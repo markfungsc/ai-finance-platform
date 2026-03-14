@@ -12,6 +12,7 @@ services:
       POSTGRES_DB: ai_finance
     volumes:
       - postgres_data:/var/lib/postgresql
+      - ./postgres:/docker-entrypoint-initdb.d
 
 volumes:
   postgres_data:
