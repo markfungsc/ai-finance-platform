@@ -1,0 +1,1 @@
+ALTER TABLE stock_prices RENAME TO raw_stock_prices;
