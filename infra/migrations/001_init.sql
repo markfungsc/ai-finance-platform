@@ -14,3 +14,31 @@ CREATE TABLE IF NOT EXISTS stock_prices (
 
 CREATE INDEX IF NOT EXISTS idx_symbol_timestamp
 ON stock_prices(symbol, timestamp);
+
+CREATE TABLE IF NOT EXISTS stock_features (
+    symbol TEXT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
+
+    close NUMERIC NOT NULL,
+
+    -- returns
+    return_1d NUMERIC,
+    return_5d NUMERIC,
+
+    -- trend
+    sma_5 NUMERIC,
+    sma_10 NUMERIC,
+    ema_10 NUMERIC,
+
+    -- volatility
+    volatility_5 NUMERIC,
+
+    -- lag features
+    lag_1 NUMERIC,
+    lag_2 NUMERIC,
+
+    PRIMARY KEY (symbol, timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS idx_features_symbol_timestamp
+ON stock_features(symbol, timestamp);

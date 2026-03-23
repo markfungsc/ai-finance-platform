@@ -15,11 +15,15 @@ migrate:
 		cd infra && docker exec -i finance_postgres psql -U postgres -d ai_finance < $$f; \
 	done
 
-run:
+ingestion:
 	export PYTHONPATH=src && python src/data_pipeline/ingestion/run_ingestion.py
 
 clean:
 	export PYTHONPATH=src && python src/data_pipeline/processing/clean_prices.py
+	
+features:
+	export PYTHONPATH=src && python src/data_pipeline/features/build_features.py
+
 
 lint:
 	ruff check src
