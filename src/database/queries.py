@@ -87,3 +87,15 @@ def upsert_features(records: list[dict]):
         for i in range(0, len(records), BATCH_SIZE):
             batch = records[i : i + BATCH_SIZE]
             conn.execute(query, batch)
+
+
+def fetch_features(symbol: str):
+    query = text("""
+        SELECT *
+        FROM stock_features
+        WHERE symbol = :symbol
+        ORDER BY timestamp
+    """)
+
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"symbol": symbol})

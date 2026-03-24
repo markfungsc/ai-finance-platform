@@ -99,6 +99,7 @@ export DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ai_fi
 | `make ingestion` | Incremental load → `raw_stock_prices` |
 | `make clean` | Silver transformation |
 | `make features` | Gold feature build / upsert |
+| `make train` | Baseline ML on `stock_features` (Postgres must be up; run ingestion/clean/features first if tables are empty) |
 | `make lint` / `make fmt` | Ruff |
 
 ## Engineering notes

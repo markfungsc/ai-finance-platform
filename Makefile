@@ -24,6 +24,8 @@ clean:
 features:
 	export PYTHONPATH=src && python src/data_pipeline/features/build_features.py
 
+train:
+	export PYTHONPATH=src && python src/scripts/run_train.py
 
 lint:
 	ruff check src
