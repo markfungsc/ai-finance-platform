@@ -44,4 +44,4 @@ FEATURE_COLUMNS_Z = [
     "lag_2_z",
 ]
 
-TARGET_COLUMN = "target_return_1d"
+TARGET_COLUMN = "target_return_5d"

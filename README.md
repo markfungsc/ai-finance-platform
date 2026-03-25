@@ -16,14 +16,27 @@ The system implements a **medallion-style data architecture** in PostgreSQL—ra
 
 Incremental pipelines support multi-symbol loads and time-bounded feature rebuilds (lookback window for rolling correctness). Schema and migrations: [`infra/postgres/`](infra/postgres/), [`infra/migrations/`](infra/migrations/).
 
+## Progress
+
+What works end-to-end today (local, Postgres-backed):
+
+- **Pipelines:** `make ingestion` → `make clean` → `make features` into `stock_features` (returns, rolling stats, lags; z-score columns for ML).
+- **ML dataset:** [`src/ml/dataset.py`](src/ml/dataset.py) loads raw + z features, merges on `(symbol, timestamp)`, and builds a **forward** label from `return_5d` with a configurable shift (default 5 bars) in [`src/ml/helpers/merge_features.py`](src/ml/helpers/merge_features.py).
+- **Training:** `make train` runs [`src/scripts/run_train.py`](src/scripts/run_train.py) (scikit-learn RandomForest, joblib artifact under `models/`).
+- **Evaluation & backtest:** metrics via [`src/ml/evaluate.py`](src/ml/evaluate.py); `make backtest` and `make walk-forward` exercise [`src/ml/backtest/`](src/ml/backtest/).
+- **Inference (CLI):** `make predict` runs [`src/ml/inference/predict.py`](src/ml/inference/predict.py) (optional merge debug output for inspection).
+- **Tests & lint:** `make test` (pytest), `make lint` / `make fmt` (Ruff).
+
+Not here yet: HTTP inference API, containerized app service, experiment tracking, and automated promotion (see roadmap).
+
 ## Strategic roadmap
 
 Status: **Delivered** · **In flight** · **Planned**
 
 | Checkpoint | Objective | Status |
 |------------|------------|--------|
-| **W1** | Core data path + baseline ML artifact | **In flight** — ETL and feature layer **delivered** for equities; training/serving **planned** |
-| **W2** | Inference API + service packaging | **In flight** — database containerized; application API and full stack images **planned** |
+| **W1** | Core data path + baseline ML artifact | **In flight** — data + features + **local** train / eval / backtest / CLI predict **delivered**; **serving API** and registry **planned** |
+| **W2** | Inference API + service packaging | **In flight** — database containerized; **HTTP inference** and full stack images **planned** |
 | **W4** | Experiment tracking & reproducibility | **Planned** — MLflow-class runs, metrics, model lineage |
 | **W6** | Transformer-based financial sentiment | **Planned** — news → scores → joinable features |
 | **W8** | Time-series / gradient-boosted forecasting | **Planned** — comparative evaluation under same tracking layer |
@@ -67,10 +80,11 @@ src/
 │   ├── ingestion/      # Market data → bronze
 │   ├── processing/     # Bronze → silver
 │   └── features/       # Silver → gold
-└── scripts/
+├── ml/                 # Dataset, training helpers, backtest, CLI predict
+└── scripts/            # Entrypoints (e.g. run_train)
 ```
 
-Core feature computation: [`src/data_pipeline/features/build_features.py`](src/data_pipeline/features/build_features.py).
+Core feature computation: [`src/data_pipeline/features/build_features.py`](src/data_pipeline/features/build_features.py). ML wiring: [`src/ml/`](src/ml/).
 
 ## Requirements
 
@@ -100,12 +114,17 @@ export DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ai_fi
 | `make clean` | Silver transformation |
 | `make features` | Gold feature build / upsert |
 | `make train` | Baseline ML on `stock_features` (Postgres must be up; run ingestion/clean/features first if tables are empty) |
+| `make backtest` | Run backtest driver on loaded dataset + saved model |
+| `make walk-forward` | Walk-forward backtest test script |
+| `make predict` | CLI inference script (`src/ml/inference/predict.py`) |
+| `make test` | Pytest (`tests/`) |
 | `make lint` / `make fmt` | Ruff |
 
 ## Engineering notes
 
 - Streaming ingestion with batched writes; feature upserts executed in transactions.
 - No lookahead in engineered features; incremental feature runs use a bounded history window for rolling statistics.
+- Baseline backtesting and walk-forward helpers live under `src/ml/backtest/`; they reuse the same dataset merge and label semantics as training.
 - Optional extension: high-throughput ingest, low-latency inference, or simulation/backtesting in a systems language alongside this Python stack.
 
 ## License

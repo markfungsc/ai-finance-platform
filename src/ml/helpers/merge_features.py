@@ -9,6 +9,7 @@ _DEBUG_TABLE_COLS: tuple[str, ...] = (
     "return_5d",
     "return_1d_z",
     "return_5d_z",
+    "target_return_5d",
 )
 
 
