@@ -10,24 +10,27 @@ from database.connection import engine
 from database.queries import get_latest_timestamp
 
 
-def fetch_records(symbol: str, session):
+def fetch_records(symbol: str, session, backfill: bool = False):
     """Fetch dataframe and yield record dicts"""
-    last_timestamp = get_latest_timestamp(session, symbol)
-    if last_timestamp:
-        start_date = (last_timestamp + timedelta(days=1)).strftime("%Y-%m-%d")
-    else:
+    if backfill:
         start_date = None
+    else:
+        last_timestamp = get_latest_timestamp(session, symbol)
+        if start_date:
+            start_date = (last_timestamp + timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            start_date = None
     df = fetch_stock_price(symbol, start_date=start_date)
 
     for record in df.to_dict(orient="records"):
         yield record
 
 
-def record_stream(symbols: list[str], session):
+def record_stream(symbols: list[str], session, backfill: bool = False):
     """Create a generator of records across all symbols"""
     time.sleep(0.2)
     for symbol in symbols:
-        yield from fetch_records(symbol, session)
+        yield from fetch_records(symbol, session, backfill)
 
 
 def batch_iterator(iterator, batch_size: int):
@@ -51,8 +54,10 @@ def upsert_batch(records: list[dict]):
         conn.execute(insert_query, records)
 
 
-def load_stock_data_batch(symbols: list[str], session, batch_size: int = 1000):
-    stream = record_stream(symbols, session)
+def load_stock_data_batch(
+    symbols: list[str], session, batch_size: int = 1000, backfill: bool = False
+):
+    stream = record_stream(symbols, session, backfill)
     for batch in batch_iterator(stream, batch_size):
         upsert_batch(batch)
 
@@ -64,6 +69,6 @@ if __name__ == "__main__":
     batch_size = 1000
 
     with Session() as session:
-        load_stock_data_batch(symbols, session, batch_size)
+        load_stock_data_batch(symbols, session, batch_size, False)
 
     print("Stock data loaded")

@@ -3,6 +3,12 @@ from sklearn.linear_model import LinearRegression
 from ml.dataset import load_dataset
 
 
+def train_linear_regression(X_train, y_train):
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    return model
+
+
 def train_model(symbol="AAPL"):
     X, y, df = load_dataset(symbol)
 

@@ -34,6 +34,7 @@ def fetch_stock_price(
 
 
 if __name__ == "__main__":
-    data = fetch_stock_price("AAPL")
-    print(data.head())
-    print(data.tail())
+    for symbol in ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]:
+        data = fetch_stock_price(symbol)
+        print(f"{symbol} | {data.head()}")
+        print(f"{symbol} | {data.tail()}")

@@ -1,0 +1,12 @@
+ALTER TABLE stock_features ADD COLUMN return_10d NUMERIC;
+ALTER TABLE stock_features ADD COLUMN return_20d NUMERIC;
+ALTER TABLE stock_features ADD COLUMN sma_20 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN sma_50 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN sma_100 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN ema_20 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN ema_50 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN ema_100 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN volatility_10 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN volatility_20 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN volatility_50 NUMERIC;
+ALTER TABLE stock_features ADD COLUMN volatility_100 NUMERIC;

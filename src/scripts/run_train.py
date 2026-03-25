@@ -2,7 +2,7 @@ import sys
 
 from sqlalchemy.exc import OperationalError
 
-from ml.evaluate import evaluate
+from ml.evaluate import evaluate_model
 from ml.train import train_model
 
 
@@ -26,7 +26,7 @@ def main() -> None:
         )
         raise SystemExit(1) from None
 
-    evaluate(preds, y_test)
+    evaluate_model(preds, y_test)
 
 
 if __name__ == "__main__":

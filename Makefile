@@ -27,8 +27,23 @@ features:
 train:
 	export PYTHONPATH=src && python src/scripts/run_train.py
 
+walk-forward:
+	export PYTHONPATH=src && python src/ml/backtest/test_walk_forward.py
+
+backtest:
+	export PYTHONPATH=src && python src/ml/backtest/run_backtest.py
+
+predict:
+	export PYTHONPATH=src && python src/ml/inference/predict.py
+
 lint:
 	ruff check src
 
 fmt:
 	ruff format src
+
+test:
+	export PYTHONPATH=src && pytest tests
+
+activate-vm:
+	source .venv/bin/activate
