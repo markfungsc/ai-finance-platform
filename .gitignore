@@ -205,3 +205,20 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Experiment tracking/output
+mlruns/
+mlflow.db
+# Generated experiment artifacts
+experiments/artifacts/
+experiments/results.csv
+# Trained model binaries
+models/*.pkl
+# Python runtime/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+# Local env
+.venv/
+.env

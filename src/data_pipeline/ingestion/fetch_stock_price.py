@@ -1,6 +1,8 @@
 import pandas as pd
 import yfinance as yf
 
+from constants import SUBSCRIPTIONS
+
 
 def fetch_stock_price(
     symbol: str, start_date: str | None = None, end_date: str | None = None
@@ -34,7 +36,7 @@ def fetch_stock_price(
 
 
 if __name__ == "__main__":
-    for symbol in ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]:
+    for symbol in SUBSCRIPTIONS:
         data = fetch_stock_price(symbol)
         print(f"{symbol} | {data.head()}")
         print(f"{symbol} | {data.tail()}")

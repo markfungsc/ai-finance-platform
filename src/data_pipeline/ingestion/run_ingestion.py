@@ -1,5 +1,6 @@
 from sqlalchemy.orm import sessionmaker
 
+from constants import SUBSCRIPTIONS
 from data_pipeline.ingestion.load_stock_data import (
     batch_iterator,
     record_stream,
@@ -23,5 +24,5 @@ def run_ingestion(symbols: list[str], batch_size: int = 500):
 
 
 if __name__ == "__main__":
-    symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
+    symbols = SUBSCRIPTIONS
     run_ingestion(symbols)

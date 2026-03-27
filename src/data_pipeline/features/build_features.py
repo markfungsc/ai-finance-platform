@@ -1,40 +1,21 @@
 import pandas as pd
+import ta
 
+from constants import SUBSCRIPTIONS
 from database.queries import (
     STOCK_FEATURES_VALUE_COLUMNS,
     delete_incomplete_stock_feature_rows,
+    delete_incomplete_stock_feature_zscore_rows,
     fetch_clean_data,
+    get_features_count,
+    get_features_zscore_count,
     get_latest_feature_timestamp,
     upsert_features,
     upsert_features_z,
 )
 
 # Rows must be complete on these columns before upsert (matches stock_features INSERT).
-_STOCK_FEATURES_COLUMNS = [
-    "symbol",
-    "timestamp",
-    "close",
-    "return_1d",
-    "return_5d",
-    "return_10d",
-    "return_20d",
-    "sma_5",
-    "sma_10",
-    "sma_20",
-    "sma_50",
-    "sma_100",
-    "ema_10",
-    "ema_20",
-    "ema_50",
-    "ema_100",
-    "volatility_5",
-    "volatility_10",
-    "volatility_20",
-    "volatility_50",
-    "volatility_100",
-    "lag_1",
-    "lag_2",
-]
+_STOCK_FEATURES_COLUMNS = ["symbol", "timestamp", *STOCK_FEATURES_VALUE_COLUMNS]
 
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -50,10 +31,15 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["sma_20"] = df["close"].rolling(20).mean()
     df["sma_50"] = df["close"].rolling(50).mean()
     df["sma_100"] = df["close"].rolling(100).mean()
+    df["sma_200"] = df["close"].rolling(200).mean()
     df["ema_10"] = df["close"].ewm(span=10).mean()
     df["ema_20"] = df["close"].ewm(span=20).mean()
     df["ema_50"] = df["close"].ewm(span=50).mean()
     df["ema_100"] = df["close"].ewm(span=100).mean()
+    df["ema_200"] = df["close"].ewm(span=200).mean()
+
+    df["ema_trend_bull"] = df["ema_20"] - df["ema_50"]
+    df["ema_slope_20"] = df["ema_20"].pct_change(20)
 
     df["volatility_5"] = df["return_1d"].rolling(5).std()
     df["volatility_10"] = df["return_1d"].rolling(10).std()
@@ -64,6 +50,40 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["lag_1"] = df["close"].shift(1)
     df["lag_2"] = df["close"].shift(2)
 
+    # Trend
+    trend_mask = (df["ema_20"] > df["sma_50"]) & (df["ema_50"] > df["ema_100"])
+    df["ema_trend_bull"] = trend_mask.astype(float)
+    df["ema_slope_20"] = (df["ema_20"] - df["ema_20"].shift(5)) / df["ema_20"].shift(5)
+
+    # Momentum
+    df["rsi_14"] = ta.momentum.rsi(df["close"], window=14)
+    df["rsi_21"] = ta.momentum.rsi(df["close"], window=21)
+    df["macd"] = ta.trend.macd(df["close"], window_slow=26, window_fast=12)
+    df["macd_signal"] = ta.trend.macd_signal(
+        df["close"], window_slow=26, window_fast=12, window_sign=9
+    )
+    df["roc_5"] = ta.momentum.roc(df["close"], window=5)
+    df["roc_10"] = ta.momentum.roc(df["close"], window=10)
+    df["stochastic_k"] = ta.momentum.stoch(
+        df["high"], df["low"], df["close"], window=14, smooth_window=3
+    )
+    df["stochastic_d"] = ta.momentum.stoch_signal(
+        df["high"], df["low"], df["close"], window=14, smooth_window=3
+    )
+
+    # Risk
+    df["atr_14"] = ta.volatility.average_true_range(
+        df["high"], df["low"], df["close"], window=14
+    )
+    df["volatility_ratio"] = df["volatility_20"] / df["volatility_50"]
+
+    # Price / Structure
+    df["close_vs_high_10"] = (df["close"] - df["high"].rolling(10).max()) / df[
+        "high"
+    ].rolling(10).max()
+    df["close_vs_low_10"] = (df["close"] - df["low"].rolling(10).min()) / df[
+        "low"
+    ].rolling(10).min()
     return df
 
 
@@ -113,6 +133,7 @@ def run_feature_pipeline(symbol: str, backfill: bool = False) -> None:
 
     df = rowwise_cross_sectional_zscore(df, value_cols)
     z_cols = _z_column_names()
+    print(z_cols)
     df = df.dropna()
     if df.empty:
         print(f"No complete rows for {symbol} after z-score; skipping upsert")
@@ -122,16 +143,29 @@ def run_feature_pipeline(symbol: str, backfill: bool = False) -> None:
     if removed:
         print(f"Removed {removed} incomplete stock_features row(s)")
 
+    removed_z = delete_incomplete_stock_feature_zscore_rows(symbol)
+    if removed_z:
+        print(f"Removed {removed} incomplete stock_features_zscore row(s)")
+
     base_records = df[_STOCK_FEATURES_COLUMNS].to_dict(orient="records")
     z_records = df[["symbol", "timestamp", *z_cols]].to_dict(orient="records")
     upsert_features(base_records)
     upsert_features_z(z_records)
 
+    features_count = get_features_count()
+    features_zscore_count = get_features_zscore_count()
+
+    if features_count != features_zscore_count:
+        raise ValueError("Features count and features zscore count do not match")
+
     print(f"Finished features for {symbol}")
+    print(f"Total Features count: {features_count}")
+    print(f"Total Features zscore count: {features_zscore_count}")
 
 
 if __name__ == "__main__":
     # symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
-    symbols = ["AAPL"]
+    # symbols = ["AAPL"]
+    symbols = SUBSCRIPTIONS
     for sym in symbols:
-        run_feature_pipeline(sym, backfill=True)
+        run_feature_pipeline(sym, backfill=False)

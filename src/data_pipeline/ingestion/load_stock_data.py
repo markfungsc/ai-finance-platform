@@ -16,7 +16,7 @@ def fetch_records(symbol: str, session, backfill: bool = False):
         start_date = None
     else:
         last_timestamp = get_latest_timestamp(session, symbol)
-        if start_date:
+        if last_timestamp:
             start_date = (last_timestamp + timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             start_date = None
@@ -65,10 +65,11 @@ def load_stock_data_batch(
 Session = sessionmaker(bind=engine)
 
 if __name__ == "__main__":
-    symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
+    # symbols = SUBSCRIPTIONS
+    symbols = ["QQQ", "SPY", "^VIX"]
     batch_size = 1000
 
     with Session() as session:
-        load_stock_data_batch(symbols, session, batch_size, False)
+        load_stock_data_batch(symbols, session, batch_size, True)
 
     print("Stock data loaded")

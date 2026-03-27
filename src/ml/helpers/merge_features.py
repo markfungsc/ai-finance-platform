@@ -1,6 +1,11 @@
 import pandas as pd
 
-from ml.features import FEATURE_COLUMNS_Z, TARGET_COLUMN
+from ml.features import (
+    FEATURE_COLUMNS_MARKET_CONTEXT_Z,
+    FEATURE_COLUMNS_Z,
+    TARGET_COLUMN,
+)
+from ml.helpers.generate_trade_labels import generate_trade_labels
 
 _DEBUG_TABLE_COLS: tuple[str, ...] = (
     "timestamp",
@@ -9,7 +14,7 @@ _DEBUG_TABLE_COLS: tuple[str, ...] = (
     "return_5d",
     "return_1d_z",
     "return_5d_z",
-    "target_return_5d",
+    "trade_success",
 )
 
 
@@ -30,26 +35,26 @@ def _debug_print_tail(name: str, frame: pd.DataFrame, n: int = 10) -> None:
 def merge_features_with_target(
     df: pd.DataFrame,
     df_z: pd.DataFrame,
-    target_shift: int = 5,
-    *,
     debug: bool = False,
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     if debug:
         _debug_print_tail("df (input)", df)
         _debug_print_tail("df_z (input)", df_z)
 
-    df_raw = df.copy()
-    df_raw[TARGET_COLUMN] = df_raw["return_5d"].shift(-target_shift)
-    df_raw = df_raw.dropna(subset=[TARGET_COLUMN])
-
+    df_merged = df.merge(df_z, on=["symbol", "timestamp"], how="inner")
+    df_merged = df_merged.reset_index(drop=True)
     if debug:
-        _debug_print_tail("df_raw (after target + dropna)", df_raw)
+        _debug_print_tail("df_merged before labeling", df_merged)
 
-    df_merged = df_raw.merge(df_z, on=["symbol", "timestamp"], how="inner")
-    X = df_merged[FEATURE_COLUMNS_Z].reset_index(drop=True)
-    y = df_merged[TARGET_COLUMN].reset_index(drop=True)
-
+    # Generate swing trade labels
+    df_labeled = generate_trade_labels(df_merged)
     if debug:
-        _debug_print_tail("df_merged (inner join)", df_merged)
+        _debug_print_tail("df_labeled", df_labeled)
 
-    return X, y, df_merged
+    X = df_labeled[FEATURE_COLUMNS_Z + FEATURE_COLUMNS_MARKET_CONTEXT_Z].reset_index(
+        drop=True
+    )
+    y = df_labeled[TARGET_COLUMN].reset_index(drop=True)
+    df_labeled = df_labeled.reset_index(drop=True)
+
+    return X, y, df_labeled

@@ -12,16 +12,21 @@ from data_pipeline.features.build_features import (
     run_feature_pipeline,
 )
 from database.queries import STOCK_FEATURES_VALUE_COLUMNS
+from ml.features import FEATURE_COLUMNS, FEATURE_COLUMNS_Z
 
 
 def _synthetic_ohlc_frame(n_rows: int = 150) -> pd.DataFrame:
     """Enough rows for sma_100 / volatility_100 warm-up."""
     idx = pd.date_range("2020-01-01", periods=n_rows, freq="B", tz="UTC")
     close = np.linspace(100.0, 100.0 + n_rows * 0.1, n_rows)
+    high = close * 1.01
+    low = close * 0.99
     return pd.DataFrame(
         {
             "symbol": ["TEST"] * n_rows,
             "timestamp": idx,
+            "high": high,
+            "low": low,
             "close": close,
         }
     )
@@ -34,7 +39,7 @@ class TestComputeFeatures:
             assert col in df.columns
 
     def test_warmup_then_finite(self) -> None:
-        df = compute_features(_synthetic_ohlc_frame(150))
+        df = compute_features(_synthetic_ohlc_frame(400))
         tail = df.iloc[-1]
         assert pd.notna(tail["return_1d"])
         assert pd.notna(tail["sma_100"])
@@ -44,6 +49,12 @@ class TestComputeFeatures:
         df = compute_features(_synthetic_ohlc_frame(20))
         expected = df["close"].pct_change(1).iloc[-1]
         assert df["return_1d"].iloc[-1] == pytest.approx(expected)
+
+    def test_feature_contracts_are_in_sync(self) -> None:
+        # DB non-key columns should be exactly the model base feature list.
+        assert list(STOCK_FEATURES_VALUE_COLUMNS)[1:] == FEATURE_COLUMNS
+        # Every base feature should have a corresponding *_z feature.
+        assert FEATURE_COLUMNS_Z == [f"{c}_z" for c in FEATURE_COLUMNS]
 
 
 class TestRowwiseCrossSectionalZscore:
@@ -87,7 +98,7 @@ class TestRunFeaturePipeline:
         mock_upsert: object,
         mock_upsert_z: object,
     ) -> None:
-        mock_fetch.return_value = _synthetic_ohlc_frame(150)
+        mock_fetch.return_value = _synthetic_ohlc_frame(400)
 
         run_feature_pipeline("TEST", backfill=True)
 

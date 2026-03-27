@@ -1,4 +1,4 @@
-.PHONY: lint fmt
+.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict test activate-vm
 
 up:
 	cd infra && docker compose up -d
@@ -32,6 +32,12 @@ walk-forward:
 
 backtest:
 	export PYTHONPATH=src && python src/ml/backtest/run_backtest.py
+
+experiments:
+	export PYTHONPATH=src && python src/ml/experiments/run_experiment.py
+
+view-results:
+	export PYTHONPATH=src && python src/ml/experiments/view_results.py
 
 predict:
 	export PYTHONPATH=src && python src/ml/inference/predict.py

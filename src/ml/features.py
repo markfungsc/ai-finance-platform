@@ -1,47 +1,37 @@
-FEATURE_COLUMNS = [
-    "return_1d",
-    "return_5d",
-    "return_10d",
-    "return_20d",
-    "sma_5",
-    "sma_10",
-    "sma_20",
-    "sma_50",
-    "sma_100",
-    "ema_10",
-    "ema_20",
-    "ema_50",
-    "ema_100",
-    "volatility_5",
-    "volatility_10",
-    "volatility_20",
-    "volatility_50",
-    "volatility_100",
-    "lag_1",
-    "lag_2",
+from feature_schema import BASE_FEATURE_COLUMNS, z_columns
+
+FEATURE_COLUMNS = list(BASE_FEATURE_COLUMNS)
+
+FEATURE_COLUMNS_MARKET_CONTEXT = [
+    "spy_return_1d",
+    "spy_return_5d",
+    "spy_volatility_20",
+    "spy_sma_20",
+    "spy_ema_trend_bull",
+    "spy_ema_slope_20",
+    "vix_level",
+    "vix_change",
+    "vix_return_5d",
+    "vix_volatility_20",
+    "vix_sma_20",
 ]
 
-FEATURE_COLUMNS_Z = [
-    "return_1d_z",
-    "return_5d_z",
-    "return_10d_z",
-    "return_20d_z",
-    "sma_5_z",
-    "sma_10_z",
-    "sma_20_z",
-    "sma_50_z",
-    "sma_100_z",
-    "ema_10_z",
-    "ema_20_z",
-    "ema_50_z",
-    "ema_100_z",
-    "volatility_5_z",
-    "volatility_10_z",
-    "volatility_20_z",
-    "volatility_50_z",
-    "volatility_100_z",
-    "lag_1_z",
-    "lag_2_z",
+FEATURE_COLUMNS_MARKET_CONTEXT_Z = [
+    "spy_return_1d_z",
+    "spy_return_5d_z",
+    "spy_volatility_20_z",
+    "spy_sma_20_z",
+    "spy_ema_trend_bull_z",
+    "spy_ema_slope_20_z",
+    "spy_return_5d_z_minus_1d_z",
+    "vix_level_z",
+    "vix_change_z",
+    "vix_return_5d_z",
+    "vix_volatility_20_z",
+    "vix_sma_20_z",
+    "vix_high_vol_z",
 ]
 
-TARGET_COLUMN = "target_return_5d"
+FEATURE_COLUMNS_Z = z_columns(BASE_FEATURE_COLUMNS)
+
+TARGET_COLUMN = "trade_success"

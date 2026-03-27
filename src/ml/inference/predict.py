@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from database.queries import fetch_features, fetch_features_z
+from ml.helpers.attach_market_context import attach_market_context
 from ml.helpers.merge_features import merge_features_with_target
 from ml.models.save_loads import load_model
 
@@ -36,7 +37,6 @@ def generate_signals(predictions: np.ndarray) -> np.ndarray:
 def predict_for_symbol(
     model_path: str,
     symbol: str,
-    target_shift: int = 5,
     n_display: int = 50,
     *,
     debug_merge: bool = False,
@@ -58,8 +58,11 @@ def predict_for_symbol(
     df = fetch_features(symbol)
     df_z = fetch_features_z(symbol)
 
+    # attach market context
+    df_z_context = attach_market_context(df_z)
+
     X, y_actual, df_merged = merge_features_with_target(
-        df, df_z, target_shift=target_shift, debug=debug_merge
+        df, df_z_context, debug=debug_merge
     )
 
     # Generate predictions
