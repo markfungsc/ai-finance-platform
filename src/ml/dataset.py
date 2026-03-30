@@ -2,8 +2,11 @@ import pandas as pd
 
 from constants import TRAIN_SYMBOLS
 from database.queries import fetch_features, fetch_features_z
+from log_config import get_logger
 from ml.helpers.attach_market_context import attach_market_context
 from ml.helpers.merge_features import merge_features_with_target
+
+logger = get_logger(__name__)
 
 
 def load_train_dataset(debug_merge: bool = False):
@@ -47,11 +50,11 @@ def load_train_dataset(debug_merge: bool = False):
             sample = df_z_ctx.loc[
                 df_z_ctx["timestamp"].isin(shared_ts), shown_cols
             ].sort_values(["timestamp", "symbol"])
-            print(
-                "\n[load_train_dataset] Market-context sample "
-                "(same timestamp, different symbols)"
+            logger.info(
+                "[load_train_dataset] Market-context sample "
+                "(same timestamp, different symbols)\n%s",
+                sample.to_string(index=False),
             )
-            print(sample.to_string(index=False))
             check_cols = [c for c in shown_cols if c not in {"timestamp", "symbol"}]
             if check_cols:
                 per_ts_consistent = (
@@ -60,23 +63,30 @@ def load_train_dataset(debug_merge: bool = False):
                     .le(1)
                     .all(axis=1)
                 )
-                print(
+                logger.info(
                     "[load_train_dataset] Context identical across symbols "
-                    f"for sampled timestamps: {bool(per_ts_consistent.all())}"
+                    "for sampled timestamps: %s",
+                    bool(per_ts_consistent.all()),
                 )
     X, y, df_merged = merge_features_with_target(df_all, df_z_ctx, debug=debug_merge)
     return X, y, df_merged
 
 
-def load_dataset(symbol: str, debug_merge: bool = False):
+def load_dataset(symbol: str, debug_merge: bool = False, quiet: bool = False):
     df = fetch_features(symbol)  # contains high/low/close
     df_z = fetch_features_z(symbol)  # z-score features
-    print(f"Loaded {len(df_z)} rows for {symbol} z-scores")
-    print("df columns:", df.columns)
+    if not quiet:
+        logger.info(
+            "Loaded %d rows for %s z-scores; df columns: %s",
+            len(df_z),
+            symbol,
+            list(df.columns),
+        )
 
     # attach market context
     df_z_context = attach_market_context(df_z)
-    print(f"Loaded {len(df_z_context)} rows for {symbol} market context")
+    if not quiet:
+        logger.info("Loaded %d rows for %s market context", len(df_z_context), symbol)
 
     X, y, df_merged = merge_features_with_target(
         df,

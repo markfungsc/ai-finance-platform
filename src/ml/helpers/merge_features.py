@@ -1,11 +1,15 @@
 import pandas as pd
 
+from log_config import get_logger
 from ml.features import (
     FEATURE_COLUMNS_MARKET_CONTEXT_Z,
     FEATURE_COLUMNS_Z,
     TARGET_COLUMN,
 )
 from ml.helpers.generate_trade_labels import generate_trade_labels
+
+logger = get_logger(__name__)
+
 
 _DEBUG_TABLE_COLS: tuple[str, ...] = (
     "timestamp",
@@ -20,16 +24,18 @@ _DEBUG_TABLE_COLS: tuple[str, ...] = (
 
 def _debug_print_tail(name: str, frame: pd.DataFrame, n: int = 10) -> None:
     k = min(n, len(frame))
-    print(f"\n[merge_features_with_target] {name} — last {k} of {len(frame)} rows")
+    logger.debug(
+        "[merge_features_with_target] %s — last %d of %d rows", name, k, len(frame)
+    )
     if len(frame) == 0:
-        print("  (empty)")
+        logger.debug("  (empty)")
         return
     cols = [c for c in _DEBUG_TABLE_COLS if c in frame.columns]
     if not cols:
-        print("  (none of: " + ", ".join(_DEBUG_TABLE_COLS) + ")")
+        logger.debug("  (none of: %s)", ", ".join(_DEBUG_TABLE_COLS))
         return
     table = frame.loc[:, cols].tail(n)
-    print(table.to_string(index=False))
+    logger.debug("%s", table.to_string(index=False))
 
 
 def merge_features_with_target(

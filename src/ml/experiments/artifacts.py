@@ -8,6 +8,21 @@ except ImportError:  # pragma: no cover - optional plotting dependency
     plt = None
 
 
+def _dedupe_pooled_timestamp_for_plot(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For pooled runs, strategy/market equity values repeat for each symbol row at the
+    same timestamp. When plotting the pooled portfolio curve, use one point per
+    timestamp.
+    """
+    if "timestamp" not in df.columns:
+        return df
+    return (
+        df.sort_values("timestamp")
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .copy()
+    )
+
+
 def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_paths: list[str] = []
@@ -49,12 +64,26 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
             plt.close()
 
             plt.figure(figsize=(8, 4))
-            plt.plot(detail["df_backtest"]["cum_strategy_return"], label="Strategy")
+
+            df_backtest = detail["df_backtest"]
+            pooled_ready = (
+                market_label == "pooled_equal_weight"
+                and "timestamp" in df_backtest.columns
+                and "cum_strategy_return" in df_backtest.columns
+            )
+            if pooled_ready:
+                plot_df = _dedupe_pooled_timestamp_for_plot(df_backtest)
+                x = plot_df["timestamp"]
+            else:
+                plot_df = df_backtest
+                x = plot_df.index
+
+            plt.plot(x, plot_df["cum_strategy_return"], label="Strategy")
             market_series_col = (
                 "cum_market_return_pooled_eqw"
                 if (
                     market_label == "pooled_equal_weight"
-                    and "cum_market_return_pooled_eqw" in detail["df_backtest"].columns
+                    and "cum_market_return_pooled_eqw" in df_backtest.columns
                 )
                 else "cum_market_return"
             )
@@ -63,16 +92,18 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
                 if market_label == "pooled_equal_weight"
                 else "Market"
             )
-            plt.plot(detail["df_backtest"][market_series_col], label=market_plot_label)
+            if pooled_ready:
+                plt.plot(x, plot_df[market_series_col], label=market_plot_label)
+            else:
+                plt.plot(plot_df[market_series_col], label=market_plot_label)
             plt.title(f"Split {split}: Cumulative Returns ({market_label})")
-            plt.xlabel("row")
+            plt.xlabel("timestamp" if pooled_ready else "row")
             plt.ylabel("cumulative return")
             plt.legend()
             plt.tight_layout()
             plt.savefig(cumret_path)
             plt.close()
 
-            df_backtest = detail["df_backtest"]
             pooled_ready = (
                 market_label == "pooled_equal_weight"
                 and "symbol" in df_backtest.columns
@@ -92,14 +123,20 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
 
                 plt.figure(figsize=(11, 6))
                 for sym in symbols:
-                    grp = by_symbol[by_symbol["symbol"].astype(str) == sym].copy()
-                    grp["cum_strategy_return_symbol"] = (
-                        1.0 + grp["strategy_return"]
-                    ).cumprod()
-                    grp["market_return_symbol"] = grp["close"].pct_change().fillna(0.0)
-                    grp["cum_market_return_symbol"] = (
-                        1.0 + grp["market_return_symbol"]
-                    ).cumprod()
+                    m = by_symbol["symbol"].astype(str) == sym
+                    sub = by_symbol.loc[m].copy()
+                    market_ret = sub["close"].pct_change().fillna(0.0)
+                    extra = pd.DataFrame(
+                        {
+                            "cum_strategy_return_symbol": (
+                                1.0 + sub["strategy_return"]
+                            ).cumprod(),
+                            "market_return_symbol": market_ret,
+                            "cum_market_return_symbol": (1.0 + market_ret).cumprod(),
+                        },
+                        index=sub.index,
+                    )
+                    grp = pd.concat([sub, extra], axis=1)
                     x = grp["timestamp"] if "timestamp" in grp.columns else grp.index
                     plt.plot(
                         x, grp["cum_strategy_return_symbol"], label=f"{sym} strategy"

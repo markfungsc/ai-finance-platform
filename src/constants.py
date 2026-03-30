@@ -20,3 +20,5 @@ MAX_HOLD_DAYS = 10
 # EV = P(win) * TP - (1 - P(win)) * SL
 # trade only if P(win)*0.08 - (1-P(win))*0.04 > 0 => P(win) > 0.33
 THRESHOLD = 0.33
+
+EXPERIMENT_STRATEGY_SLUG = "swing-trade"

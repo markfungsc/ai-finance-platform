@@ -1,6 +1,10 @@
 import numpy as np
 from sklearn.metrics import mean_absolute_error
 
+from log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def evaluate_model(predictions, actual, *, verbose: bool = True) -> dict[str, float]:
     mae = mean_absolute_error(actual, predictions)
@@ -10,8 +14,8 @@ def evaluate_model(predictions, actual, *, verbose: bool = True) -> dict[str, fl
     directional_accuracy = direction_correct.mean()
 
     if verbose:
-        print(f"MAE: {mae:.6f}")
-        print(f"Directional Accuracy: {directional_accuracy:.2%}")
+        logger.info("MAE: %.6f", mae)
+        logger.info("Directional Accuracy: %.2f%%", directional_accuracy * 100.0)
 
     return {
         "mae": float(mae),

@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict test activate-vm
+.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api test activate-vm
 
 up:
 	cd infra && docker compose up -d
@@ -42,8 +42,14 @@ view-results:
 predict:
 	export PYTHONPATH=src && python src/ml/inference/predict.py
 
+serve-api:
+	export PYTHONPATH=src && uvicorn api.main:app --host 0.0.0.0 --port 8000
+
 lint:
 	ruff check src
+
+lint-fix:
+	ruff check src --fix
 
 fmt:
 	ruff format src

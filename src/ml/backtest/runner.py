@@ -1,31 +1,15 @@
 import numpy as np
 import pandas as pd
 
-from constants import THRESHOLD
-from ml.backtest.engine import basic_backtest
+from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
+from log_config import get_logger
+from ml.backtest.engine import basic_backtest, pooled_eqw_market_cum_return
+from ml.backtest.threshold_optimization import optimize_thresholds
 from ml.backtest.walk_forward import walk_forward_split
 from ml.evaluate import evaluate_model
-from ml.models.save_loads import save_model
+from ml.models.save_loads import save_feature_columns, save_model
 
-
-def _pooled_eqw_market_cum_return(df_test_rows: pd.DataFrame) -> float:
-    if df_test_rows.empty:
-        return 1.0
-    required = {"timestamp", "symbol", "close"}
-    if not required.issubset(df_test_rows.columns):
-        return 1.0
-
-    px = df_test_rows.loc[:, ["timestamp", "symbol", "close"]].copy()
-    px = px.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
-    px["symbol_return"] = px.groupby("symbol", sort=False)["close"].pct_change()
-    eqw_ret = (
-        px.dropna(subset=["symbol_return"])
-        .groupby("timestamp", sort=True)["symbol_return"]
-        .mean()
-    )
-    if eqw_ret.empty:
-        return 1.0
-    return float((1.0 + eqw_ret).cumprod().iloc[-1])
+logger = get_logger(__name__)
 
 
 def run_backtest(
@@ -48,7 +32,7 @@ def run_backtest(
         df_merged["symbol"].nunique() > 1
     )
     run_scope = "pooled" if pooled_mode else symbol
-    print(f"Running backtest for {run_scope} with {len(X)} rows")
+    logger.info("Running backtest for %s with %d rows", run_scope, len(X))
 
     results = []
     if pooled_mode:
@@ -119,10 +103,12 @@ def run_backtest(
             preds = model.predict(X_test_model)
             probs = np.clip(np.asarray(preds, dtype=float), 0.0, 1.0)
 
-        print("Probability stats:")
-        print("min:", probs.min())
-        print("max:", probs.max())
-        print("mean:", probs.mean())
+        logger.info(
+            "Probability stats min=%s max=%s mean=%s",
+            probs.min(),
+            probs.max(),
+            probs.mean(),
+        )
         # Evaluate prediction metrics
         pred_classes = (probs > 0.5).astype(int)
         metrics = evaluate_model(pred_classes, y_test, verbose=False)
@@ -130,7 +116,7 @@ def run_backtest(
         results.append(metrics)
         final_model = model
 
-        print(f"split {i} | {metrics}")
+        logger.info("split %s | %s", i, metrics)
 
         # --- Run basic backtest using predicted returns ---
         df_test = X_test.copy()
@@ -143,11 +129,12 @@ def run_backtest(
             df_test["symbol"] = df_test_rows["symbol"].to_numpy()
         df_test["prob_trade_success"] = probs
 
+        df_pred_for_backtest = df_test.copy()
         df_backtest, metrics_strategy = basic_backtest(
             df_test, pred_col="prob_trade_success", threshold=threshold
         )
         if pooled_mode:
-            pooled_eqw_cum_market_return = _pooled_eqw_market_cum_return(df_test_rows)
+            pooled_eqw_cum_market_return = pooled_eqw_market_cum_return(df_test_rows)
             metrics_strategy["cum_market_return"] = pooled_eqw_cum_market_return
             metrics_strategy["cum_market_return_pooled_eqw"] = (
                 pooled_eqw_cum_market_return
@@ -156,7 +143,8 @@ def run_backtest(
             if "timestamp" in df_test_rows.columns and not df_backtest.empty:
                 px = df_test_rows.loc[:, ["timestamp", "symbol", "close"]].copy()
                 px = px.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
-                px["symbol_return"] = px.groupby("symbol", sort=False)[
+                # Single-step `.loc` assignment to avoid pandas CoW/chained-assignment warnings.
+                px.loc[:, "symbol_return"] = px.groupby("symbol", sort=False)[
                     "close"
                 ].pct_change()
                 eqw_path = (
@@ -191,6 +179,8 @@ def run_backtest(
                 "X_test_head": X_test.head().copy(),
                 "y_test_head": y_test.head().copy(),
                 "probs": probs.copy(),
+                "df_pred_for_backtest": df_pred_for_backtest,
+                "df_test_rows": df_test_rows.copy(),
                 "df_backtest": df_backtest.copy(),
                 "metrics_strategy": metrics_strategy,
                 "per_symbol_metrics": per_symbol_metrics,
@@ -200,11 +190,14 @@ def run_backtest(
             }
         )
 
-        print(
-            f"split {i} strategy | cum_return: {metrics_strategy['cum_return']:.4f}, "
-            f"cum_market_return: {metrics_strategy['cum_market_return']:.4f}, "
-            f"directional_accuracy: {metrics_strategy['directional_accuracy']:.2f}% "
-            f"(trades={metrics_strategy['strategy_trade_count']})"
+        logger.info(
+            "split %s strategy | cum_return: %.4f, cum_market_return: %.4f, "
+            "directional_accuracy: %.2f%% (trades=%s)",
+            i,
+            metrics_strategy["cum_return"],
+            metrics_strategy["cum_market_return"],
+            metrics_strategy["directional_accuracy"],
+            metrics_strategy["strategy_trade_count"],
         )
 
     # Aggregate prediction metrics
@@ -228,6 +221,21 @@ def run_backtest(
         (100.0 * total_hits / total_trades) if total_trades else 0.0
     )
 
+    if all_backtest_metrics:
+        avg_win_rate = _finite_mean([m["win_rate"] for m in all_backtest_metrics])
+        avg_profit_factor = _finite_mean(
+            [m["profit_factor"] for m in all_backtest_metrics]
+        )
+        avg_max_drawdown = _finite_mean(
+            [m["max_drawdown"] for m in all_backtest_metrics]
+        )
+    else:
+        avg_win_rate = 0.0
+        avg_profit_factor = 0.0
+        avg_max_drawdown = 0.0
+
+    threshold_optimization = optimize_thresholds(split_details, pooled_mode)
+
     summary = {
         "avg_mae": avg_mae,
         "avg_directional_accuracy": avg_dir,
@@ -237,14 +245,21 @@ def run_backtest(
         "avg_strategy_directional_accuracy": strategy_dir_pooled_pct,
         "strategy_total_trades": total_trades,
         "strategy_total_hits": total_hits,
+        "avg_win_rate": avg_win_rate,
+        "avg_profit_factor": avg_profit_factor,
+        "avg_max_drawdown": avg_max_drawdown,
+        "threshold_optimization": threshold_optimization,
         "split_details": split_details,
     }
 
-    print(f"\nModel trained for {run_scope}")
+    logger.info("Model trained for %s", run_scope)
 
     # Save final model
-    model_path = f"models/{model_name}_{run_scope}.pkl"
+    model_path = f"models/{EXPERIMENT_STRATEGY_SLUG}/{model_name}_{run_scope}.pkl"
     save_model(final_model, model_path)
-    print(f"Model saved to {model_path}")
+    # Save feature columns
+    feature_cols_path = f"models/{EXPERIMENT_STRATEGY_SLUG}/{model_name}_{run_scope}_feature_columns.pkl"
+    save_feature_columns(feature_cols, feature_cols_path)
+    logger.info("Model saved to %s", model_path)
 
     return results, summary, final_model
