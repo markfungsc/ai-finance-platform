@@ -232,6 +232,41 @@ def fetch_features_z(symbol: str):
         return pd.read_sql(query, conn, params={"symbol": symbol})
 
 
+def fetch_features_window(symbols: list[str], ts_min, ts_max) -> pd.DataFrame:
+    """Fetch raw stock_features rows for a symbol/time window.
+
+    Used by the backtest UI to attach DB-derived indicators to backtest splits.
+    """
+    if not symbols or ts_min is None or ts_max is None:
+        return pd.DataFrame()
+    query = text(
+        """
+        SELECT symbol, timestamp, open, high, low, close, volume,
+               return_1d, return_5d, return_10d, return_20d,
+               sma_5, sma_10, sma_20, sma_50, sma_100,
+               ema_10, ema_20, ema_50, ema_100,
+               volatility_5, volatility_10, volatility_20, volatility_50, volatility_100,
+               lag_1, lag_2,
+               sma_200, ema_200,
+               ema_trend_bull, ema_slope_20,
+               rsi_14, rsi_21,
+               macd, macd_signal,
+               roc_5, roc_10,
+               stochastic_k, stochastic_d,
+               atr_14, volatility_ratio,
+               close_vs_high_10, close_vs_low_10,
+               bb_mavg_20, bb_hband_20, bb_lband_20, bb_width_20, bb_pband_20
+        FROM stock_features
+        WHERE symbol = ANY(:symbols)
+          AND timestamp BETWEEN :ts_min AND :ts_max
+        ORDER BY symbol, timestamp
+        """
+    )
+    params = {"symbols": symbols, "ts_min": ts_min, "ts_max": ts_max}
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params=params)
+
+
 def get_features_count():
     query = text("""
         SELECT COUNT(*) FROM stock_features

@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
-import ta
 from plotly.subplots import make_subplots
 
 
@@ -18,11 +18,119 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def experiments_host_root() -> Path:
+    """
+    Host-side root for experiments used by Streamlit when reading CSVs directly.
+    """
+    return repo_root() / "experiments"
+
+
 def default_artifacts_root() -> Path:
     raw = os.environ.get("BACKTEST_ARTIFACTS_ROOT")
     if raw:
         return Path(raw).expanduser()
-    return repo_root() / "experiments/artifacts/swing-trade/pooled_random_forest"
+    return experiments_host_root() / "artifacts/swing-trade/pooled_random_forest"
+
+
+def _api_base_url() -> str:
+    return os.environ.get("INFERENCE_API_BASE_URL", "http://localhost:8000")
+
+
+def _artifacts_root_for_api(artifacts_root: Path) -> Path:
+    """
+    Map a host artifacts_root to the path visible from the API container.
+
+    When the API runs in Docker, experiments are mounted at /app/experiments
+    (see docker-compose). We derive a relative path from the host experiments
+    root and join it under the container root so that:
+
+        host:      /home/.../experiments/artifacts/...
+        container: /app/experiments/artifacts/...
+
+    For local/non-Docker runs, or when the mapping cannot be determined,
+    we fall back to the original artifacts_root.
+    """
+    raw = os.environ.get("BACKTEST_ARTIFACTS_ROOT_API")
+    if raw:
+        return Path(raw).expanduser()
+
+    host_exp_root = experiments_host_root()
+    try:
+        rel = artifacts_root.resolve().relative_to(host_exp_root.resolve())
+    except ValueError:
+        # Not under the expected experiments root; just pass through.
+        return artifacts_root
+
+    container_root = Path(
+        os.environ.get("BACKTEST_EXPERIMENTS_ROOT_CONTAINER", "/app/experiments")
+    )
+    return container_root / rel
+
+
+def fetch_indicators_api(
+    artifacts_root: Path, split_id: int, symbol: str
+) -> pd.DataFrame:
+    url = f"{_api_base_url().rstrip('/')}/backtest/indicators"
+    params: dict[str, str | int] = {
+        "artifacts_root": str(_artifacts_root_for_api(artifacts_root)),
+        "split_id": split_id,
+        "symbol": symbol,
+    }
+    resp = requests.get(url, params=params, timeout=15)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        detail: str | None = None
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict):
+                d = payload.get("detail")
+                # FastAPI may return detail as str or list[dict]
+                if isinstance(d, str):
+                    detail = d
+        except Exception:
+            detail = None
+        msg = f"{e}"
+        if detail:
+            msg = f"{msg} - detail: {detail}"
+        raise requests.HTTPError(msg, response=resp) from e
+    data = resp.json()
+    if not data:
+        return pd.DataFrame()
+    return pd.DataFrame(data)
+
+
+def fetch_trades_api(
+    artifacts_root: Path, split_id: int, symbol: str | None = None
+) -> pd.DataFrame:
+    url = f"{_api_base_url().rstrip('/')}/backtest/trades"
+    params: dict[str, str | int] = {
+        "artifacts_root": str(_artifacts_root_for_api(artifacts_root)),
+        "split_id": split_id,
+    }
+    if symbol:
+        params["symbol"] = symbol
+    resp = requests.get(url, params=params, timeout=15)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        detail: str | None = None
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict):
+                d = payload.get("detail")
+                if isinstance(d, str):
+                    detail = d
+        except Exception:
+            detail = None
+        msg = f"{e}"
+        if detail:
+            msg = f"{msg} - detail: {detail}"
+        raise requests.HTTPError(msg, response=resp) from e
+    data = resp.json()
+    if not data:
+        return pd.DataFrame()
+    return pd.DataFrame(data)
 
 
 def dedupe_pooled_timestamp_for_plot(df: pd.DataFrame) -> pd.DataFrame:
@@ -79,30 +187,41 @@ def final_cum_returns(df: pd.DataFrame) -> tuple[float, float]:
     return cs, cm
 
 
-def add_raw_indicators(g: pd.DataFrame) -> pd.DataFrame:
-    g = g.sort_values("timestamp").copy() if "timestamp" in g.columns else g.copy()
-    close = g["close"].astype(float)
-
-    g.loc[:, "ema_10"] = ta.trend.ema_indicator(close, window=10)
-    g.loc[:, "ema_20"] = ta.trend.ema_indicator(close, window=20)
-    g.loc[:, "sma_20"] = ta.trend.sma_indicator(close, window=20)
-    g.loc[:, "rsi_14"] = ta.momentum.rsi(close, window=14)
-    g.loc[:, "macd_line"] = ta.trend.macd(close, window_slow=26, window_fast=12)
-    g.loc[:, "macd_signal"] = ta.trend.macd_signal(
-        close, window_slow=26, window_fast=12, window_sign=9
-    )
-    g.loc[:, "macd_hist"] = ta.trend.macd_diff(
-        close, window_slow=26, window_fast=12, window_sign=9
-    )
-    return g
+def attach_db_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Deprecated: kept for compatibility; indicators now fetched via API in render."""
+    return df
 
 
 def build_trade_pnl_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-trade table from signal rows (entry-centric, with simple inferred exits).
+
+    This treats each row with signal==1 as an entry and uses strategy_return on that row
+    as the trade return. Exit timestamp/price are approximated as the next bar.
+    """
     if "signal" not in df.columns or "strategy_return" not in df.columns:
         return pd.DataFrame()
-    tr = df.loc[df["signal"] == 1].copy()
+    base = (
+        df.sort_values(["symbol", "timestamp"])
+        if {
+            "symbol",
+            "timestamp",
+        }
+        <= set(df.columns)
+        else df.copy()
+    )
+    base = base.reset_index(drop=True)
+
+    if base.empty:
+        return base
+
+    # Approximate exit at next bar for visualization; strategy_return is already TP/SL.
+    exit_ts = base["timestamp"].shift(-1) if "timestamp" in base.columns else None
+    exit_px = base["close"].shift(-1) if "close" in base.columns else None
+
+    tr = base[base["signal"] == 1].copy()
     if tr.empty:
         return tr
+
     sym_col = "symbol" if "symbol" in tr.columns else None
     if sym_col is None:
         tr.loc[:, "_symbol"] = "__single__"
@@ -112,15 +231,27 @@ def build_trade_pnl_table(df: pd.DataFrame) -> pd.DataFrame:
     for sym, g in tr.groupby(sym_col, sort=False):
         g = g.sort_values("timestamp") if "timestamp" in g.columns else g
         r = g["strategy_return"].astype(float).to_numpy()
+        finite = np.isfinite(r)
+        if not finite.all():
+            g = g.iloc[finite].copy()
+            r = r[finite]
+        if not len(g):
+            continue
         cum = np.cumprod(1.0 + r)
         for i in range(len(g)):
+            idx = g.index[i]
             rows.append(
                 {
                     "symbol": str(sym) if sym != "__single__" else "—",
-                    "timestamp": g["timestamp"].iloc[i]
+                    "entry_timestamp": g["timestamp"].iloc[i]
                     if "timestamp" in g.columns
                     else None,
-                    "strategy_return": float(r[i]),
+                    "exit_timestamp": exit_ts.iloc[idx]
+                    if exit_ts is not None
+                    else None,
+                    "entry_price": g["close"].iloc[i] if "close" in g.columns else None,
+                    "exit_price": exit_px.iloc[idx] if exit_px is not None else None,
+                    "trade_return": float(r[i]),
                     "trade_compounded_equity": float(cum[i]),
                 }
             )
@@ -182,7 +313,11 @@ def plotly_trade_equity_by_symbol(df: pd.DataFrame) -> go.Figure | None:
 
 
 def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
-    g = add_raw_indicators(df_sym)
+    g = (
+        df_sym.sort_values("timestamp").copy()
+        if "timestamp" in df_sym.columns
+        else df_sym.copy()
+    )
     x = g["timestamp"] if "timestamp" in g.columns else g.index
 
     fig = make_subplots(
@@ -233,6 +368,9 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
         ("ema_10", "EMA 10", None),
         ("ema_20", "EMA 20", "dash"),
         ("sma_20", "SMA 20", "dot"),
+        ("bb_mavg_20", "BB mavg 20", "dot"),
+        ("bb_hband_20", "BB high 20", "dash"),
+        ("bb_lband_20", "BB low 20", "dash"),
     ):
         if col in g.columns:
             fig.add_trace(
@@ -257,14 +395,15 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
         tx = (
             g["timestamp"].to_numpy() if "timestamp" in g.columns else np.arange(len(g))
         )
+        # Entry markers
         fig.add_trace(
             go.Scatter(
                 x=tx[sig],
                 y=g["close"].to_numpy()[sig],
                 mode="markers",
-                name="Entry signal",
+                name="Entry",
                 marker=dict(
-                    size=11,
+                    size=10,
                     symbol="triangle-up",
                     color=colors[sig],
                     line=dict(width=1, color="white"),
@@ -273,30 +412,58 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
             row=1,
             col=1,
         )
+        # Approximate exits one bar after entry where available.
+        if "close" in g.columns:
+            exit_idx = np.where(sig)[0] + 1
+            exit_idx = exit_idx[exit_idx < len(g)]
+            if len(exit_idx):
+                fig.add_trace(
+                    go.Scatter(
+                        x=tx[exit_idx],
+                        y=g["close"].to_numpy()[exit_idx],
+                        mode="markers",
+                        name="Exit",
+                        marker=dict(
+                            size=9,
+                            symbol="triangle-down",
+                            color=colors[exit_idx],
+                            line=dict(width=1, color="white"),
+                        ),
+                    ),
+                    row=1,
+                    col=1,
+                )
 
-    fig.add_trace(
-        go.Bar(x=x, y=g["macd_hist"], name="MACD hist", marker_color="lightblue"),
-        row=2,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=x, y=g["macd_line"], name="MACD", line=dict(color="#1f77b4")),
-        row=2,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x, y=g["macd_signal"], name="MACD sig", line=dict(color="#ff7f0e")
-        ),
-        row=2,
-        col=1,
-    )
+    if {"macd", "macd_signal"} <= set(g.columns):
+        fig.add_trace(
+            go.Bar(
+                x=x,
+                y=g.get("macd_hist", (g["macd"] - g["macd_signal"])),
+                name="MACD hist",
+                marker_color="lightblue",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=x, y=g["macd"], name="MACD", line=dict(color="#1f77b4")),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=g["macd_signal"], name="MACD sig", line=dict(color="#ff7f0e")
+            ),
+            row=2,
+            col=1,
+        )
 
-    fig.add_trace(
-        go.Scatter(x=x, y=g["rsi_14"], name="RSI 14", line=dict(color="#9467bd")),
-        row=3,
-        col=1,
-    )
+    if "rsi_14" in g.columns:
+        fig.add_trace(
+            go.Scatter(x=x, y=g["rsi_14"], name="RSI 14", line=dict(color="#9467bd")),
+            row=3,
+            col=1,
+        )
 
     fig.add_hline(y=70, line_dash="dot", line_color="gray", row=3, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="gray", row=3, col=1)
@@ -443,28 +610,57 @@ def render(artifacts_root_str: str) -> None:
 
         if len(symbols) > 1:
             sym_pick = st.selectbox("Symbol", symbols, key="split_symbol")
-            df_plot = df[df["symbol"].astype(str) == sym_pick].copy()
         else:
-            df_plot = df.copy()
             sym_pick = symbols[0] if symbols else "—"
 
-        if "close" not in df_plot.columns:
-            st.error("No `close` column — cannot plot TA.")
-        else:
-            try:
-                fig_p = plotly_split_panels(df_plot, str(sym_pick))
-                st.plotly_chart(fig_p, use_container_width=True)
-            except Exception as e:
-                st.exception(e)
+        try:
+            if not symbols:
+                st.error("No symbol information found in backtest.csv.")
+            else:
+                df_plot_ind = fetch_indicators_api(artifacts_root, snum, sym_pick)
+                if df_plot_ind.empty:
+                    st.error(
+                        "No indicator data returned from API for this symbol/split."
+                    )
+                else:
+                    # Ensure timestamp is datetime for plotting
+                    if "timestamp" in df_plot_ind.columns:
+                        df_plot_ind["timestamp"] = pd.to_datetime(
+                            df_plot_ind["timestamp"], utc=True, errors="coerce"
+                        )
+                    fig_p = plotly_split_panels(df_plot_ind, str(sym_pick))
+                    st.plotly_chart(fig_p, use_container_width=True)
+        except Exception as e:
+            st.exception(e)
 
     with sub_tr:
-        tbl = build_trade_pnl_table(df)
+        # Fetch per-trade table via API, defaulting to All symbols first.
+        try:
+            tbl = fetch_trades_api(artifacts_root, snum, None)
+        except Exception as e:
+            st.exception(e)
+            tbl = pd.DataFrame()
         if tbl.empty:
             st.info("No rows with `signal == 1` for trade table.")
         else:
-            st.subheader("Each entry: compounded equity within symbol (chronological)")
-            st.dataframe(tbl, use_container_width=True, height=340)
-            fig_te = plotly_trade_equity_by_symbol(df)
+            symbols_tr = sorted(tbl["symbol"].dropna().astype(str).unique())
+            sym_filter = st.selectbox(
+                "Trades — symbol", ["All"] + symbols_tr, key="trades_symbol"
+            )
+            if sym_filter != "All":
+                tbl_view = tbl[tbl["symbol"].astype(str) == sym_filter]
+            else:
+                tbl_view = tbl
+
+            st.subheader("Per-trade PnL (entry/exit, compounded equity)")
+            st.dataframe(tbl_view, use_container_width=True, height=340)
+
+            fig_te = None
+            if sym_filter == "All":
+                fig_te = plotly_trade_equity_by_symbol(df)
+            else:
+                df_sym = df[df.get("symbol", "").astype(str) == sym_filter]
+                fig_te = plotly_trade_equity_by_symbol(df_sym)
             if fig_te is not None:
                 st.plotly_chart(fig_te, use_container_width=True)
 

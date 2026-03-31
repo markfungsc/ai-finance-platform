@@ -33,6 +33,7 @@ services:
       FEATURE_COLUMNS_PATH: /app/models/swing-trade/random_forest_pooled_feature_columns.pkl
     volumes:
       - ../models:/app/models:ro
+      - ../experiments:/app/experiments:ro
     depends_on:
       postgres:
         condition: service_healthy

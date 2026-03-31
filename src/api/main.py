@@ -7,15 +7,19 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
+from database.queries import fetch_features_window
 from log_config import get_logger
 from ml.inference.api_inference import predict_trade_success_probability
 from ml.models.save_loads import load_feature_columns, load_model, load_scaler
+from ui.backtest_tab import load_backtest_csv
 
 logger = get_logger(__name__)
 
@@ -31,6 +35,27 @@ _DEFAULT_FEATURE_COL_REL = (
     / "random_forest_pooled_feature_columns.pkl"
 )
 
+BACKTEST_INDICATOR_COLUMNS: list[str] = [
+    "symbol",
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "ema_10",
+    "ema_20",
+    "sma_20",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "bb_mavg_20",
+    "bb_hband_20",
+    "bb_lband_20",
+    "bb_width_20",
+    "bb_pband_20",
+]
+
 
 class PredictSymbolRequest(BaseModel):
     symbol: str = Field(..., min_length=1, examples=["AAPL"])
@@ -45,6 +70,37 @@ class PredictSymbolResponse(BaseModel):
 class ThresholdGridResponse(BaseModel):
     best_threshold: float
     grid: list[dict]
+
+
+class BacktestIndicatorsRow(BaseModel):
+    symbol: str
+    timestamp: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: float | None = None
+    ema_10: float | None = None
+    ema_20: float | None = None
+    sma_20: float | None = None
+    rsi_14: float | None = None
+    macd: float | None = None
+    macd_signal: float | None = None
+    bb_mavg_20: float | None = None
+    bb_hband_20: float | None = None
+    bb_lband_20: float | None = None
+    bb_width_20: float | None = None
+    bb_pband_20: float | None = None
+
+
+class BacktestTradeRow(BaseModel):
+    symbol: str
+    entry_timestamp: str | None = None
+    exit_timestamp: str | None = None
+    entry_price: float | None = None
+    exit_price: float | None = None
+    trade_return: float
+    trade_compounded_equity: float
 
 
 def _resolve_artifact_path(env_var: str, default_relative: Path) -> str:
@@ -229,3 +285,178 @@ def threshold_grid():
         best_threshold=float(app.state.best_threshold),
         grid=app.state.threshold_grid or [],
     )
+
+
+@app.get("/backtest/indicators", response_model=list[BacktestIndicatorsRow])
+def backtest_indicators(
+    artifacts_root: str = Query(..., description="Backtest artifacts root folder"),
+    split_id: int = Query(..., ge=0, description="Split id, e.g. 0 for split_000"),
+    symbol: str = Query(..., min_length=1),
+):
+    """
+    Return OHLCV + indicator rows for a given split and symbol.
+    """
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=422, detail="symbol must be non-empty")
+
+    root = Path(artifacts_root).expanduser()
+    split_dir = root / f"split_{split_id:03d}"
+    try:
+        df = load_backtest_csv(split_dir)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    if "timestamp" not in df.columns:
+        raise HTTPException(
+            status_code=422, detail="backtest.csv missing timestamp column"
+        )
+
+    # Normalize timestamp dtype from backtest.csv to timezone-aware datetime
+    # (load_backtest_csv already attempts this, but we enforce it here to be
+    # robust to any upstream changes or alternate loaders).
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
+    if "symbol" not in df.columns:
+        df.loc[:, "symbol"] = sym
+
+    df_sym = df[df["symbol"].astype(str).str.upper() == sym].copy()
+    if df_sym.empty:
+        return []
+
+    ts_min = df_sym["timestamp"].min()
+    ts_max = df_sym["timestamp"].max()
+    feats = fetch_features_window([sym], ts_min, ts_max)
+    if feats.empty:
+        # Fall back to whatever is in backtest.csv
+        merged = df_sym
+    else:
+        feats = feats.copy()
+        # Normalize DB timestamp dtype to match df_sym (timezone-aware datetime).
+        feats["timestamp"] = pd.to_datetime(
+            feats["timestamp"], utc=True, errors="coerce"
+        )
+        merged = df_sym.merge(
+            feats,
+            on=["symbol", "timestamp"],
+            how="left",
+            suffixes=("", "_db"),
+        )
+        # Prefer DB indicator columns when present.
+        for col in BACKTEST_INDICATOR_COLUMNS:
+            if col in ("symbol", "timestamp"):
+                continue
+            db_col = f"{col}_db"
+            if db_col in merged.columns:
+                merged[col] = merged[db_col].where(
+                    merged[db_col].notna(), merged.get(col)
+                )
+                merged = merged.drop(columns=[db_col])
+
+    merged = merged.sort_values("timestamp")
+    out_cols = BACKTEST_INDICATOR_COLUMNS
+    rows: list[BacktestIndicatorsRow] = []
+    for _, r in merged.iterrows():
+        payload = {k: r[k] if k in merged.columns else None for k in out_cols}
+        payload["timestamp"] = (
+            str(payload["timestamp"]) if payload["timestamp"] is not None else None
+        )
+        rows.append(BacktestIndicatorsRow(**payload))
+    return rows
+
+
+@app.get("/backtest/trades", response_model=list[BacktestTradeRow])
+def backtest_trades(
+    artifacts_root: str = Query(..., description="Backtest artifacts root folder"),
+    split_id: int = Query(..., ge=0, description="Split id, e.g. 0 for split_000"),
+    symbol: str | None = Query(
+        None, description="Optional symbol filter; when omitted returns all symbols"
+    ),
+):
+    """
+    Return per-trade rows (entry/exit) for a given split, optionally filtered by symbol.
+    """
+    from ui.backtest_tab import build_trade_pnl_table  # local import to avoid cycles
+
+    root = Path(artifacts_root).expanduser()
+    split_dir = root / f"split_{split_id:03d}"
+    try:
+        df = load_backtest_csv(split_dir)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    if symbol:
+        sym = symbol.strip().upper()
+        if "symbol" in df.columns:
+            df = df[df["symbol"].astype(str).str.upper() == sym]
+
+    tbl = build_trade_pnl_table(df)
+    if tbl.empty:
+        return []
+
+    # Defensive guard: ensure numeric fields are finite before serialization.
+    for col in ("trade_return", "trade_compounded_equity"):
+        if col in tbl.columns:
+            mask = np.isfinite(tbl[col].astype(float).to_numpy())
+            if not mask.all():
+                logger.warning(
+                    "backtest_trades dropping %d rows with non-finite %s "
+                    "for artifacts_root=%s split_id=%d symbol=%s",
+                    int((~mask).sum()),
+                    col,
+                    artifacts_root,
+                    split_id,
+                    symbol or "*",
+                )
+                tbl = tbl[mask]
+    if tbl.empty:
+        return []
+
+    rows: list[BacktestTradeRow] = []
+    for _, r in tbl.iterrows():
+        try:
+            # Required numeric fields must be finite floats
+            tr = float(r["trade_return"])
+            te = float(r["trade_compounded_equity"])
+            if not (np.isfinite(tr) and np.isfinite(te)):
+                continue
+
+            # Optional price fields: coerce to float when finite, else None
+            ep_raw = r.get("entry_price")
+            xp_raw = r.get("exit_price")
+            ep = (
+                float(ep_raw)
+                if ep_raw is not None and np.isfinite(float(ep_raw))
+                else None
+            )
+            xp = (
+                float(xp_raw)
+                if xp_raw is not None and np.isfinite(float(xp_raw))
+                else None
+            )
+
+            payload = {
+                "symbol": str(r.get("symbol", "")),
+                "entry_timestamp": str(r["entry_timestamp"])
+                if r.get("entry_timestamp") is not None
+                else None,
+                "exit_timestamp": str(r["exit_timestamp"])
+                if r.get("exit_timestamp") is not None
+                else None,
+                "entry_price": ep,
+                "exit_price": xp,
+                "trade_return": tr,
+                "trade_compounded_equity": te,
+            }
+            rows.append(BacktestTradeRow(**payload))
+        except Exception as e:  # pragma: no cover - extremely defensive
+            logger.warning(
+                "backtest_trades skipping malformed row for artifacts_root=%s split_id=%d symbol=%s error=%s",
+                artifacts_root,
+                split_id,
+                symbol or "*",
+                e,
+            )
+            continue
+    return rows

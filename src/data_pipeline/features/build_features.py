@@ -21,6 +21,7 @@ _STOCK_FEATURES_COLUMNS = ["symbol", "timestamp", *STOCK_FEATURES_VALUE_COLUMNS]
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # Sort then materialize; use `.loc[:, col] =` for new columns (pandas 3 CoW).
     df = df.sort_values(by="timestamp").reset_index(drop=True).copy()
+
     for col in ("open", "high", "low", "close", "volume"):
         if col in df.columns:
             df.loc[:, col] = pd.to_numeric(df[col], errors="coerce")

@@ -21,6 +21,8 @@ def _synthetic_ohlc_frame(n_rows: int = 150) -> pd.DataFrame:
     close = np.linspace(100.0, 100.0 + n_rows * 0.1, n_rows)
     high = close * 1.01
     low = close * 0.99
+    open = close * 0.99
+    volume = np.random.randint(1000, 10000, n_rows)
     return pd.DataFrame(
         {
             "symbol": ["TEST"] * n_rows,
@@ -28,6 +30,8 @@ def _synthetic_ohlc_frame(n_rows: int = 150) -> pd.DataFrame:
             "high": high,
             "low": low,
             "close": close,
+            "open": open,
+            "volume": volume,
         }
     )
 
