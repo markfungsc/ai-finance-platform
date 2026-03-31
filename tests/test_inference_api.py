@@ -1,5 +1,7 @@
 """Tests for ml.inference.api_inference and api.main FastAPI app."""
 
+import json
+
 import importlib
 from unittest.mock import patch
 
@@ -152,3 +154,74 @@ def test_startup_fails_when_artifacts_missing(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="Artifact not found"):
         with TestClient(api_main.app):
             pass
+
+
+def test_threshold_grid_endpoint_fallback(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+    monkeypatch.delenv("THRESHOLD_GRID_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_main.app) as client:
+        r = client.get("/threshold_grid")
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["best_threshold"] == pytest.approx(THRESHOLD)
+    assert payload["grid"] == []
+
+
+def test_threshold_grid_endpoint_loads(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+    monkeypatch.delenv("THRESHOLD_GRID_PATH", raising=False)
+
+    best_path = model_path.with_name(f"{model_path.stem}_best_threshold.json")
+    best_path.write_text(json.dumps({"best_threshold": 0.42}), encoding="utf-8")
+
+    grid_path = model_path.with_name(f"{model_path.stem}_threshold_grid.json")
+    grid_payload = {
+        "best_threshold": 0.42,
+        "grid": [
+            {
+                "threshold": 0.3,
+                "avg_cum_return": 1.1,
+                "avg_profit_factor": 1.5,
+                "avg_win_rate": 0.2,
+                "avg_max_drawdown": -0.1,
+                "total_trades": 10,
+                "avg_expectancy": 0.01,
+            }
+        ],
+    }
+    grid_path.write_text(json.dumps(grid_payload), encoding="utf-8")
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_main.app) as client:
+        r = client.get("/threshold_grid")
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["best_threshold"] == pytest.approx(0.42)
+    assert len(payload["grid"]) == 1
+    assert payload["grid"][0]["threshold"] == pytest.approx(0.3)

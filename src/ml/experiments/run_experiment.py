@@ -39,6 +39,7 @@ def run_experiment(model_name: str = "logistic_regression"):
     th_opt = summary.get("threshold_optimization") or {}
     best_agg = th_opt.get("best_aggregate") or {}
     best_threshold = best_agg.get("threshold")
+    threshold_grid = th_opt.get("grid") or []
 
     experiment = {
         "model": model_name,
@@ -79,6 +80,20 @@ def run_experiment(model_name: str = "logistic_regression"):
             encoding="utf-8",
         )
         logger.info("Saved best_threshold=%s to %s", best_threshold, best_thr_path)
+    # Persist the full threshold grid so UI / API clients can visualize it
+    # and avoid re-running expensive backtests.
+    grid_payload = {
+        "best_threshold": float(best_threshold) if best_threshold is not None else None,
+        "grid": threshold_grid,
+    }
+    grid_path = (
+        Path("models")
+        / EXPERIMENT_STRATEGY_SLUG
+        / f"{model_name}_{run_symbol}_threshold_grid.json"
+    )
+    grid_path.parent.mkdir(parents=True, exist_ok=True)
+    grid_path.write_text(json.dumps(grid_payload, indent=2), encoding="utf-8")
+    logger.info("Saved threshold_grid to %s", grid_path)
 
     log_experiment(experiment)
 

@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api test activate-vm
+.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm
 
 up:
 	cd infra && docker compose up -d
@@ -44,6 +44,9 @@ predict:
 
 serve-api:
 	export PYTHONPATH=src && uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+streamlit:
+	export PYTHONPATH=src && streamlit run src/ui/streamlit_app.py --server.port 8501
 
 lint:
 	ruff check src

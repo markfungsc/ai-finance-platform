@@ -8,9 +8,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ai_finance
-    # Official image: PGDATA=/var/lib/postgresql/data
+    # Postgres 18+ images expect a single named volume on /var/lib/postgresql (not .../data).
+    # See https://github.com/docker-library/postgres/pull/1259
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
       - ./postgres:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d ai_finance"]

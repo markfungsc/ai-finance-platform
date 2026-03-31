@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -39,6 +40,11 @@ class PredictSymbolResponse(BaseModel):
     probability_trade_success: float
     threshold_used: float
     should_trade: bool
+
+
+class ThresholdGridResponse(BaseModel):
+    best_threshold: float
+    grid: list[dict]
 
 
 def _resolve_artifact_path(env_var: str, default_relative: Path) -> str:
@@ -84,6 +90,41 @@ def _load_best_threshold(*, model_path: str) -> float:
     return float(THRESHOLD)
 
 
+def _load_threshold_grid(*, model_path: str) -> list[dict]:
+    """
+    Load persisted optimized threshold grid if available.
+
+    Expected on disk:
+      - MODEL_STEM_threshold_grid.json
+      - or a file set via THRESHOLD_GRID_PATH
+    """
+    raw = os.environ.get("THRESHOLD_GRID_PATH")
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = _REPO_ROOT / path
+        if path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload.get("grid") or []
+            if isinstance(payload, list):
+                return payload
+        logger.warning("THRESHOLD_GRID_PATH set but file missing: %s", str(path))
+        return []
+
+    mp = Path(model_path)
+    candidate = mp.with_name(f"{mp.stem}_threshold_grid.json")
+    if not candidate.is_file():
+        return []
+
+    payload = json.loads(candidate.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        return payload.get("grid") or []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
 def _load_artifacts():
     model_path = _resolve_artifact_path("MODEL_PATH", _DEFAULT_MODEL_REL)
     feature_path = _resolve_artifact_path(
@@ -92,6 +133,7 @@ def _load_artifacts():
     model = load_model(model_path)
     feature_cols = load_feature_columns(feature_path)
     best_threshold = _load_best_threshold(model_path=model_path)
+    threshold_grid = _load_threshold_grid(model_path=model_path)
     scaler = None
     scaler_raw = os.environ.get("SCALER_PATH")
     if scaler_raw:
@@ -102,26 +144,41 @@ def _load_artifacts():
             raise RuntimeError(f"SCALER_PATH={scaler_raw!s} is not an existing file")
         scaler = load_scaler(str(sp.resolve()))
     logger.info(
-        "Loaded artifacts: model=%s feature_columns=%d scaler=%s best_threshold=%s",
+        "Loaded artifacts: model=%s feature_columns=%d scaler=%s best_threshold=%s threshold_grid_rows=%d",
         model_path,
         len(feature_cols),
         "yes" if scaler is not None else "no",
         best_threshold,
+        len(threshold_grid),
     )
-    return model, feature_cols, scaler, best_threshold
+    return model, feature_cols, scaler, best_threshold, threshold_grid
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    model, feature_cols, scaler, best_threshold = _load_artifacts()
+    model, feature_cols, scaler, best_threshold, threshold_grid = _load_artifacts()
     app.state.model = model
     app.state.feature_cols = feature_cols
     app.state.scaler = scaler
     app.state.best_threshold = best_threshold
+    app.state.threshold_grid = threshold_grid
     yield
 
 
 app = FastAPI(title="AI Finance inference", lifespan=lifespan)
+
+cors_raw = os.environ.get("CORS_ALLOW_ORIGINS")
+if cors_raw:
+    origins = [o.strip() for o in cors_raw.split(",") if o.strip()]
+    if not origins:
+        origins = ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/health")
@@ -163,4 +220,12 @@ def predict_symbol(body: PredictSymbolRequest):
         probability_trade_success=p,
         threshold_used=threshold_used,
         should_trade=bool(should_trade),
+    )
+
+
+@app.get("/threshold_grid", response_model=ThresholdGridResponse)
+def threshold_grid():
+    return ThresholdGridResponse(
+        best_threshold=float(app.state.best_threshold),
+        grid=app.state.threshold_grid or [],
     )

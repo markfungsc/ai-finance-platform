@@ -1,4 +1,4 @@
-def get_feature_importance(model, feature_names, top_n=20):
+def get_feature_importance(model, feature_names, top_n=30):
     importance = model.feature_importances_
 
     pairs = sorted(

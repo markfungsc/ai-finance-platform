@@ -149,7 +149,7 @@ class TestLoadDataset:
         n = 12
         df_aapl = _make_features_df(n=n, symbol="AAPL")
         df_msft = _make_features_df(n=n, symbol="MSFT")
-        df_msft["timestamp"] = df_msft["timestamp"] + pd.Timedelta("1D")
+        df_msft.loc[:, "timestamp"] = df_msft["timestamp"] + pd.Timedelta("1D")
 
         z_aapl = _make_z_df(df_aapl["timestamp"], z_marker=10.0, symbol="AAPL").iloc[::-1]
         z_msft = _make_z_df(df_msft["timestamp"], z_marker=20.0, symbol="MSFT").iloc[::-1]

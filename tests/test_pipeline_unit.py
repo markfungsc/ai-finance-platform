@@ -12,7 +12,7 @@ from ml.helpers.generate_trade_labels import generate_trade_labels
 
 def test_sma_calculation_correctness() -> None:
     df = pd.DataFrame({"close": [1, 2, 3, 4, 5]})
-    df["sma_3"] = df["close"].rolling(3).mean()
+    df.loc[:, "sma_3"] = df["close"].rolling(3).mean()
     expected = np.array([2.0, 3.0, 4.0])
     assert np.allclose(df["sma_3"].dropna().to_numpy(), expected)
 

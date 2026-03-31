@@ -74,7 +74,7 @@ def fetch_clean_data(symbol: str, start=None):
     if start:
         # Enough history for 100-bar rolling features after incremental cutoff.
         query = text("""
-            SELECT symbol, timestamp, high, low, close
+            SELECT symbol, timestamp, open, high, low, close, volume
             FROM clean_stock_prices
             WHERE symbol = :symbol
               AND timestamp >= :start - INTERVAL '400 days'
@@ -83,7 +83,7 @@ def fetch_clean_data(symbol: str, start=None):
         params = {"symbol": symbol, "start": start}
     else:
         query = text("""
-            SELECT symbol, timestamp, high, low, close
+            SELECT symbol, timestamp, open, high, low, close, volume
             FROM clean_stock_prices
             WHERE symbol = :symbol
             ORDER BY timestamp
@@ -110,7 +110,7 @@ def get_latest_feature_timestamp(symbol: str):
 def upsert_features(records: list[dict]):
     query = text("""
         INSERT INTO stock_features (
-            symbol, timestamp, close,
+            symbol, timestamp, open, high, low, close, volume,
             return_1d, return_5d, return_10d, return_20d,
             sma_5, sma_10, sma_20, sma_50, sma_100,
             ema_10, ema_20, ema_50, ema_100,
@@ -123,10 +123,11 @@ def upsert_features(records: list[dict]):
             roc_5, roc_10,
             stochastic_k, stochastic_d,
             atr_14, volatility_ratio,
-            close_vs_high_10, close_vs_low_10
+            close_vs_high_10, close_vs_low_10,
+            bb_mavg_20, bb_hband_20, bb_lband_20, bb_width_20, bb_pband_20
         )
         VALUES (
-            :symbol, :timestamp, :close,
+            :symbol, :timestamp, :open, :high, :low, :close, :volume,
             :return_1d, :return_5d, :return_10d, :return_20d,
             :sma_5, :sma_10, :sma_20, :sma_50, :sma_100,
             :ema_10, :ema_20, :ema_50, :ema_100,
@@ -139,7 +140,8 @@ def upsert_features(records: list[dict]):
             :roc_5, :roc_10,
             :stochastic_k, :stochastic_d,
             :atr_14, :volatility_ratio,
-            :close_vs_high_10, :close_vs_low_10
+            :close_vs_high_10, :close_vs_low_10,
+            :bb_mavg_20, :bb_hband_20, :bb_lband_20, :bb_width_20, :bb_pband_20
         )
         ON CONFLICT (symbol, timestamp) DO NOTHING
     """)
@@ -153,7 +155,7 @@ def upsert_features(records: list[dict]):
 def upsert_features_z(records: list[dict]):
     query = text("""
         INSERT INTO stock_features_zscore (
-            symbol, timestamp, close_z,
+            symbol, timestamp, open_z, high_z, low_z, close_z, volume_z,
             return_1d_z, return_5d_z, return_10d_z, return_20d_z,
             sma_5_z, sma_10_z, sma_20_z, sma_50_z, sma_100_z,
             ema_10_z, ema_20_z, ema_50_z, ema_100_z,
@@ -166,10 +168,11 @@ def upsert_features_z(records: list[dict]):
             roc_5_z, roc_10_z,
             stochastic_k_z, stochastic_d_z,
             atr_14_z, volatility_ratio_z,
-            close_vs_high_10_z, close_vs_low_10_z
+            close_vs_high_10_z, close_vs_low_10_z,
+            bb_mavg_20_z, bb_hband_20_z, bb_lband_20_z, bb_width_20_z, bb_pband_20_z
         )
         VALUES (
-            :symbol, :timestamp, :close_z,
+            :symbol, :timestamp, :open_z, :high_z, :low_z, :close_z, :volume_z,
             :return_1d_z, :return_5d_z, :return_10d_z, :return_20d_z,
             :sma_5_z, :sma_10_z, :sma_20_z, :sma_50_z, :sma_100_z,
             :ema_10_z, :ema_20_z, :ema_50_z, :ema_100_z,
@@ -182,7 +185,8 @@ def upsert_features_z(records: list[dict]):
             :roc_5_z, :roc_10_z,
             :stochastic_k_z, :stochastic_d_z,
             :atr_14_z, :volatility_ratio_z,
-            :close_vs_high_10_z, :close_vs_low_10_z
+            :close_vs_high_10_z, :close_vs_low_10_z,
+            :bb_mavg_20_z, :bb_hband_20_z, :bb_lband_20_z, :bb_width_20_z, :bb_pband_20_z
         )
         ON CONFLICT (symbol, timestamp) DO NOTHING
     """)
@@ -194,7 +198,8 @@ def upsert_features_z(records: list[dict]):
 
 
 def fetch_features(symbol: str):
-    _f_cols = [c for c in STOCK_FEATURES_VALUE_COLUMNS if c != "close"]
+    _raw_cols = {"open", "high", "low", "close", "volume"}
+    _f_cols = [c for c in STOCK_FEATURES_VALUE_COLUMNS if c not in _raw_cols]
     _f_sql = ", ".join(f"f.{c}" for c in _f_cols)
     query = text(f"""
         SELECT

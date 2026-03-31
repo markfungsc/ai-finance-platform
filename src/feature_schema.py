@@ -1,6 +1,10 @@
 """Shared feature schema constants used by ML and DB layers."""
 
 BASE_FEATURE_COLUMNS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "volume",
     "return_1d",
     "return_5d",
     "return_10d",
@@ -37,6 +41,12 @@ BASE_FEATURE_COLUMNS: tuple[str, ...] = (
     "volatility_ratio",
     "close_vs_high_10",
     "close_vs_low_10",
+    # Bollinger Bands
+    "bb_mavg_20",
+    "bb_hband_20",
+    "bb_lband_20",
+    "bb_width_20",
+    "bb_pband_20",
 )
 
 
