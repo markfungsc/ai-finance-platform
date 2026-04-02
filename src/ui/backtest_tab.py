@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,28 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from plotly.subplots import make_subplots
+
+
+def _row_entry_price(row: pd.Series, *, has_entry_price: bool) -> float | None:
+    """Prefer engine ``entry_price``; fall back to bar ``close`` when missing."""
+    ep: float | None = None
+    if has_entry_price and "entry_price" in row.index:
+        v = row["entry_price"]
+        ep = float(v) if v is not None and np.isfinite(float(v)) else None
+    if ep is None and "close" in row.index:
+        v = row["close"]
+        ep = float(v) if v is not None and np.isfinite(float(v)) else None
+    return ep
+
+
+def _row_exit_raw(x_row: pd.Series, *, has_exit_price: bool) -> float | None:
+    if has_exit_price and "exit_price" in x_row.index:
+        v = x_row["exit_price"]
+        return float(v) if v is not None and np.isfinite(float(v)) else None
+    if "close" in x_row.index:
+        v = x_row["close"]
+        return float(v) if v is not None and np.isfinite(float(v)) else None
+    return None
 
 
 def repo_root() -> Path:
@@ -193,10 +216,13 @@ def attach_db_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_trade_pnl_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Per-trade table from signal rows (entry-centric, with simple inferred exits).
+    """One row per completed round-trip (entry from flat), not per raw signal bar.
 
-    This treats each row with signal==1 as an entry and uses strategy_return on that row
-    as the trade return. Exit timestamp/price are approximated as the next bar.
+    If ``entry_trade`` and ``exit_trade`` exist (from ``basic_backtest``), each entry is
+    paired to its exact exit bar and uses engine-provided ``entry_price``/``exit_price``.
+
+    If exit columns are missing (legacy artifacts), exit timestamp/price are approximated
+    as the next bar for display.
     """
     if "signal" not in df.columns or "strategy_return" not in df.columns:
         return pd.DataFrame()
@@ -214,47 +240,137 @@ def build_trade_pnl_table(df: pd.DataFrame) -> pd.DataFrame:
     if base.empty:
         return base
 
-    # Approximate exit at next bar for visualization; strategy_return is already TP/SL.
-    exit_ts = base["timestamp"].shift(-1) if "timestamp" in base.columns else None
-    exit_px = base["close"].shift(-1) if "close" in base.columns else None
-
-    tr = base[base["signal"] == 1].copy()
-    if tr.empty:
-        return tr
-
-    sym_col = "symbol" if "symbol" in tr.columns else None
+    sym_col = "symbol" if "symbol" in base.columns else None
     if sym_col is None:
-        tr.loc[:, "_symbol"] = "__single__"
+        base.loc[:, "_symbol"] = "__single__"
         sym_col = "_symbol"
 
+    has_exit_price = "exit_price" in base.columns
+    has_entry_price = "entry_price" in base.columns
+
     rows: list[dict] = []
-    for sym, g in tr.groupby(sym_col, sort=False):
+    for sym, g in base.groupby(sym_col, sort=False):
         g = g.sort_values("timestamp") if "timestamp" in g.columns else g
-        r = g["strategy_return"].astype(float).to_numpy()
-        finite = np.isfinite(r)
-        if not finite.all():
-            g = g.iloc[finite].copy()
-            r = r[finite]
-        if not len(g):
-            continue
-        cum = np.cumprod(1.0 + r)
-        for i in range(len(g)):
-            idx = g.index[i]
-            rows.append(
-                {
-                    "symbol": str(sym) if sym != "__single__" else "—",
-                    "entry_timestamp": g["timestamp"].iloc[i]
-                    if "timestamp" in g.columns
-                    else None,
-                    "exit_timestamp": exit_ts.iloc[idx]
-                    if exit_ts is not None
-                    else None,
-                    "entry_price": g["close"].iloc[i] if "close" in g.columns else None,
-                    "exit_price": exit_px.iloc[idx] if exit_px is not None else None,
-                    "trade_return": float(r[i]),
-                    "trade_compounded_equity": float(cum[i]),
-                }
-            )
+
+        if "exit_trade" in g.columns and (g["exit_trade"] == 1).any():
+            g_ord = g.reset_index(drop=True)
+            pending: deque[int] = deque()
+            pairs: list[tuple[int, int]] = []
+            for i in range(len(g_ord)):
+                row = g_ord.iloc[i]
+                et = int(row["exit_trade"]) if "exit_trade" in row.index else 0
+                ent = int(row["entry_trade"]) if "entry_trade" in row.index else 0
+                # Match engine: close open position before opening a new one on the same bar.
+                if et == 1 and pending:
+                    epos = pending.popleft()
+                    pairs.append((epos, i))
+                if ent == 1:
+                    pending.append(i)
+
+            if not pairs:
+                continue
+
+            pair_returns: list[tuple[int, int, float]] = []
+            for epos, xpos in pairs:
+                e_row = g_ord.iloc[epos]
+                r_i = float(e_row["strategy_return"])
+                if not np.isfinite(r_i):
+                    continue
+                pair_returns.append((epos, xpos, r_i))
+
+            if not pair_returns:
+                continue
+
+            r_list = np.array([t[2] for t in pair_returns], dtype=float)
+            cum = np.cumprod(1.0 + r_list)
+
+            for j, (epos, xpos, r_i) in enumerate(pair_returns):
+                e_row = g_ord.iloc[epos]
+                x_row = g_ord.iloc[xpos]
+                entry_ts = e_row["timestamp"] if "timestamp" in e_row.index else None
+                exit_ts = x_row["timestamp"] if "timestamp" in x_row.index else None
+
+                ep = _row_entry_price(e_row, has_entry_price=has_entry_price)
+                xp_raw = _row_exit_raw(x_row, has_exit_price=has_exit_price)
+
+                if ep is not None and np.isfinite(ep) and np.isfinite(r_i):
+                    xp = float(ep * (1.0 + r_i))
+                else:
+                    xp = xp_raw
+
+                rows.append(
+                    {
+                        "symbol": str(sym) if sym != "__single__" else "—",
+                        "entry_timestamp": entry_ts,
+                        "exit_timestamp": exit_ts,
+                        "entry_price": ep,
+                        "exit_price": xp,
+                        "trade_return": r_i,
+                        "trade_compounded_equity": float(cum[j]),
+                    }
+                )
+        else:
+            if "entry_trade" in g.columns:
+                entries = g[g["entry_trade"] == 1].copy()
+            else:
+                entries = g[g["signal"] == 1].copy()
+            if entries.empty:
+                continue
+
+            # Filter out non-finite returns; prices are allowed to be NaN.
+            r_series = entries["strategy_return"].astype(float)
+            finite_mask = np.isfinite(r_series.to_numpy())
+            if not finite_mask.all():
+                entries = entries.iloc[finite_mask].copy()
+            if entries.empty:
+                continue
+
+            r = entries["strategy_return"].astype(float).to_numpy()
+            cum = np.cumprod(1.0 + r)
+
+            # Legacy visualization: approximate exit on the next bar.
+            exit_ts = g["timestamp"].shift(-1) if "timestamp" in g.columns else None
+            exit_px = g["close"].shift(-1) if "close" in g.columns else None
+
+            for i in range(len(entries)):
+                idx_entry = entries.index[i]
+                entry_ts = (
+                    entries["timestamp"].iloc[i]
+                    if "timestamp" in entries.columns
+                    else None
+                )
+                exit_ts_val = exit_ts.loc[idx_entry] if exit_ts is not None else None
+
+                e_row = entries.iloc[i]
+                ep = _row_entry_price(e_row, has_entry_price=has_entry_price)
+
+                r_i = float(r[i])
+                xp_raw: float | None
+                if exit_px is not None:
+                    v = exit_px.loc[idx_entry]
+                    xp_raw = (
+                        float(v) if v is not None and np.isfinite(float(v)) else None
+                    )
+                else:
+                    xp_raw = None
+
+                if ep is not None and np.isfinite(ep) and np.isfinite(r_i):
+                    xp = float(ep * (1.0 + r_i))
+                else:
+                    xp = xp_raw
+
+                rows.append(
+                    {
+                        "symbol": str(sym) if sym != "__single__" else "—",
+                        "entry_timestamp": entry_ts,
+                        "exit_timestamp": exit_ts_val,
+                        "entry_price": ep,
+                        "exit_price": xp,
+                        "trade_return": r_i,
+                        "trade_compounded_equity": float(cum[i]),
+                    }
+                )
+
     return pd.DataFrame(rows)
 
 
@@ -312,7 +428,11 @@ def plotly_trade_equity_by_symbol(df: pd.DataFrame) -> go.Figure | None:
     return fig
 
 
-def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
+def plotly_split_panels(
+    df_sym: pd.DataFrame,
+    title_sym: str,
+    trades: pd.DataFrame | None = None,
+) -> go.Figure:
     g = (
         df_sym.sort_values("timestamp").copy()
         if "timestamp" in df_sym.columns
@@ -384,14 +504,127 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
                 col=1,
             )
 
-    if "signal" in g.columns:
+    # Accurate trade buy/sell markers (driven by engine exits).
+    if trades is not None and not trades.empty and "entry_timestamp" in trades.columns:
+        t = trades.copy()
+        if "entry_timestamp" in t.columns:
+            t.loc[:, "entry_timestamp"] = pd.to_datetime(
+                t["entry_timestamp"], utc=True, errors="coerce"
+            )
+        if "exit_timestamp" in t.columns:
+            t.loc[:, "exit_timestamp"] = pd.to_datetime(
+                t["exit_timestamp"], utc=True, errors="coerce"
+            )
+
+        entry_px = (
+            pd.to_numeric(t["entry_price"], errors="coerce")
+            if "entry_price" in t.columns
+            else pd.Series([np.nan] * len(t))
+        )
+        exit_px = (
+            pd.to_numeric(t["exit_price"], errors="coerce")
+            if "exit_price" in t.columns
+            else pd.Series([np.nan] * len(t))
+        )
+
+        trade_ret = (
+            pd.to_numeric(t["trade_return"], errors="coerce")
+            if "trade_return" in t.columns
+            else pd.Series([0.0] * len(t))
+        )
+        colors = np.where(trade_ret.to_numpy(dtype=float) >= 0, "#2ca02c", "#d62728")
+
+        # Buy markers
+        mask_buy = t["entry_timestamp"].notna().to_numpy() & np.isfinite(
+            entry_px.to_numpy(dtype=float)
+        )
+        if mask_buy.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=t.loc[mask_buy, "entry_timestamp"],
+                    y=entry_px.loc[mask_buy],
+                    mode="markers",
+                    name="Buy",
+                    marker=dict(
+                        size=10,
+                        symbol="triangle-up",
+                        color=colors[mask_buy],
+                        line=dict(width=1, color="white"),
+                    ),
+                ),
+                row=1,
+                col=1,
+            )
+
+        # Sell markers
+        mask_sell = t.get(
+            "exit_timestamp", pd.Series([None] * len(t))
+        ).notna().to_numpy() & np.isfinite(exit_px.to_numpy(dtype=float))
+        if mask_sell.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=t.loc[mask_sell, "exit_timestamp"],
+                    y=exit_px.loc[mask_sell],
+                    mode="markers",
+                    name="Sell",
+                    marker=dict(
+                        size=9,
+                        symbol="triangle-down",
+                        color=colors[mask_sell],
+                        line=dict(width=1, color="white"),
+                    ),
+                ),
+                row=1,
+                col=1,
+            )
+
+        # Dotted connectors: entry -> exit per trade.
+        conn_x: list[object] = []
+        conn_y: list[object] = []
+        for i in range(len(t)):
+            ets = (
+                t["entry_timestamp"].iloc[i] if "entry_timestamp" in t.columns else None
+            )
+            xts = t["exit_timestamp"].iloc[i] if "exit_timestamp" in t.columns else None
+            ep = entry_px.iloc[i]
+            xp = exit_px.iloc[i]
+            if (
+                pd.notna(ets)
+                and pd.notna(xts)
+                and np.isfinite(float(ep))
+                and np.isfinite(float(xp))
+            ):
+                conn_x.extend([ets, xts, None])
+                conn_y.extend([float(ep), float(xp), None])
+
+        if conn_x:
+            fig.add_trace(
+                go.Scatter(
+                    x=conn_x,
+                    y=conn_y,
+                    mode="lines",
+                    name="Trade",
+                    hoverinfo="skip",
+                    showlegend=False,
+                    line=dict(dash="dot", width=1, color="rgba(0,0,0,0.35)"),
+                ),
+                row=1,
+                col=1,
+            )
+
+    # Legacy fallback: approximate entry/exit markers from `signal` rows.
+    elif "signal" in g.columns:
         sig = g["signal"].to_numpy() == 1
         ret = (
             g["strategy_return"].astype(float).to_numpy()
             if "strategy_return" in g.columns
             else np.zeros(len(g))
         )
-        colors = np.where(ret >= 0, "#2ca02c", "#d62728")
+        sig_idx = np.flatnonzero(sig)
+        if len(sig_idx):
+            trade_colors = np.where(ret[sig_idx] >= 0, "#2ca02c", "#d62728")
+        else:
+            trade_colors = np.array([])
         tx = (
             g["timestamp"].to_numpy() if "timestamp" in g.columns else np.arange(len(g))
         )
@@ -405,7 +638,7 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
                 marker=dict(
                     size=10,
                     symbol="triangle-up",
-                    color=colors[sig],
+                    color=trade_colors,
                     line=dict(width=1, color="white"),
                 ),
             ),
@@ -413,10 +646,11 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
             col=1,
         )
         # Approximate exits one bar after entry where available.
-        if "close" in g.columns:
-            exit_idx = np.where(sig)[0] + 1
+        if "close" in g.columns and len(sig_idx):
+            exit_idx = sig_idx + 1
             exit_idx = exit_idx[exit_idx < len(g)]
             if len(exit_idx):
+                exit_colors = trade_colors[: len(exit_idx)]
                 fig.add_trace(
                     go.Scatter(
                         x=tx[exit_idx],
@@ -426,7 +660,7 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
                         marker=dict(
                             size=9,
                             symbol="triangle-down",
-                            color=colors[exit_idx],
+                            color=exit_colors,
                             line=dict(width=1, color="white"),
                         ),
                     ),
@@ -471,7 +705,48 @@ def plotly_split_panels(df_sym: pd.DataFrame, title_sym: str) -> go.Figure:
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="MACD", row=2, col=1)
     fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
-    fig.update_layout(height=820, showlegend=True, legend=dict(orientation="h", y=1.14))
+
+    # Trading-style navigation + hover alignment (Price & TA panel only).
+    fig.update_layout(
+        height=820,
+        showlegend=True,
+        legend=dict(orientation="h", y=1.14),
+        hovermode="x unified",
+        uirevision=f"price_ta_{title_sym}",
+        dragmode="pan",
+    )
+
+    # Timestamp navigator under the price chart (top row).
+    xaxis_extras: dict = {
+        "rangeslider": dict(visible=True, thickness=0.08),
+    }
+    if "timestamp" in g.columns:
+        ts_check = pd.to_datetime(g["timestamp"], utc=True, errors="coerce")
+        if ts_check.notna().any():
+            xaxis_extras["rangeselector"] = dict(
+                buttons=[
+                    dict(count=1, label="1D", step="day", stepmode="backward"),
+                    dict(count=7, label="1W", step="day", stepmode="backward"),
+                    dict(count=1, label="1M", step="month", stepmode="backward"),
+                    dict(count=3, label="3M", step="month", stepmode="backward"),
+                    dict(step="all", label="All"),
+                ]
+            )
+    fig.update_xaxes(
+        row=1,
+        col=1,
+        **xaxis_extras,
+    )
+
+    # Vertical dotted guide line across all stacked panels on hover.
+    fig.update_xaxes(
+        showspikes=True,
+        spikemode="across",
+        spikedash="dot",
+        spikecolor="rgba(60,60,60,0.45)",
+        spikesnap="cursor",
+    )
+
     return fig
 
 
@@ -543,8 +818,8 @@ def render(artifacts_root_str: str) -> None:
     m4.metric("Rows", len(df))
 
     st.caption(
-        "TA is recomputed from OHLC via `ta` (not CSV z-scores). Markers are **entries** "
-        "(green/red = realized PnL sign on that bar)."
+        "TA is recomputed from OHLC via `ta` (not CSV z-scores). Markers show buy/sell "
+        "for each completed trade (green/red = realized PnL sign)."
     )
 
     sub_eq, sub_px, sub_tr = st.tabs(
@@ -628,7 +903,15 @@ def render(artifacts_root_str: str) -> None:
                         df_plot_ind["timestamp"] = pd.to_datetime(
                             df_plot_ind["timestamp"], utc=True, errors="coerce"
                         )
-                    fig_p = plotly_split_panels(df_plot_ind, str(sym_pick))
+                    trades_df = pd.DataFrame()
+                    try:
+                        trades_df = fetch_trades_api(artifacts_root, snum, sym_pick)
+                    except Exception:
+                        trades_df = pd.DataFrame()
+
+                    fig_p = plotly_split_panels(
+                        df_plot_ind, str(sym_pick), trades=trades_df
+                    )
                     st.plotly_chart(fig_p, use_container_width=True)
         except Exception as e:
             st.exception(e)

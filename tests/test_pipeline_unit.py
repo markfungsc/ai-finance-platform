@@ -3,9 +3,9 @@
 import numpy as np
 import pandas as pd
 
+from constants import THRESHOLD
 from ml.backtest.engine import basic_backtest
 from ml.experiments.artifacts import _dedupe_pooled_timestamp_for_plot
-from constants import THRESHOLD
 from ml.features import TARGET_COLUMN
 from ml.helpers.generate_trade_labels import generate_trade_labels
 
@@ -81,8 +81,10 @@ def test_basic_backtest_pooled_avoids_cross_symbol_lookahead() -> None:
 
     # Row 0: symbol A at t=1, signal should be 1
     assert int(df_result.loc[0, "signal"]) == 1
-    # With correct symbol-wise lookahead, A's next row high=105 (<108 TP) and low=97 (>96 SL) => 0 return.
-    assert df_result.loc[0, "strategy_return"] == 0.0
+    # With correct symbol-wise lookahead, A does not hit TP/SL. It times out at the
+    # last available in-window bar (deadline clamped to last bar for the symbol),
+    # realizing midpoint return: ((high+low)/2)/entry - 1 = ((105+97)/2)/100 - 1 = 0.01.
+    assert np.isclose(float(df_result.loc[0, "strategy_return"]), 0.01)
 
     # Only one trade (A at t=1); no TP hits.
     assert metrics["strategy_trade_count"] == 1

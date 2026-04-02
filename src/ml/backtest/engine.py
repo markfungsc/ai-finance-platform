@@ -4,6 +4,27 @@ import pandas as pd
 from constants import MAX_HOLD_DAYS, SL_PCT, THRESHOLD, TP_PCT
 
 
+def _stable_sort_by_timestamp(df: pd.DataFrame, ts_col: str) -> pd.DataFrame:
+    """Sort by time; break ties with original row order so OHLC aligns with preds."""
+    out = df.copy()
+    out["_row_order"] = np.arange(len(out))
+    return out.sort_values([ts_col, "_row_order"], kind="mergesort").drop(
+        columns="_row_order"
+    )
+
+
+def _mask_trade_prices(df: pd.DataFrame) -> None:
+    """Clear entry/exit prices where the corresponding trade flag is off (CSV clarity)."""
+    et = df["entry_trade"].fillna(0).astype(int).to_numpy()
+    xt = df["exit_trade"].fillna(0).astype(int).to_numpy()
+    ep = df["entry_price"].to_numpy(dtype=float)
+    xp = df["exit_price"].to_numpy(dtype=float)
+    ep = np.where(et == 1, ep, np.nan)
+    xp = np.where(xt == 1, xp, np.nan)
+    df.loc[:, "entry_price"] = ep
+    df.loc[:, "exit_price"] = xp
+
+
 def pooled_eqw_market_cum_return(df_test_rows: pd.DataFrame) -> float:
     """Equal-weight pooled market cumulative return (same as walk-forward pooled mode)."""
     if df_test_rows.empty:
@@ -27,10 +48,16 @@ def pooled_eqw_market_cum_return(df_test_rows: pd.DataFrame) -> float:
     return float((1.0 + eqw_ret).cumprod().iloc[-1])
 
 
-def _extended_trade_metrics(df: pd.DataFrame) -> dict[str, float]:
-    """Metrics from signal rows (strategy_return, cum_strategy_return)."""
-    sig = df["signal"] == 1
-    trades = df.loc[sig, "strategy_return"]
+def _extended_trade_metrics(
+    df: pd.DataFrame,
+    completed_trade_returns: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Metrics from completed round-trip returns (preferred) or legacy signal rows."""
+    if completed_trade_returns is not None:
+        trades = pd.Series(completed_trade_returns, dtype=float)
+    else:
+        sig = df["signal"] == 1
+        trades = df.loc[sig, "strategy_return"]
     n = int(len(trades))
     if n == 0:
         return {
@@ -93,47 +120,131 @@ def _backtest_single_series(
 ):
     """
     Backtest assuming `pred/high/low/close` are aligned to a single chronological time series.
-    Returns arrays aligned with the input order.
+
+    At most one open position at a time. New signals while already in a trade **renew**
+    the TP/SL window: ``deadline = t + MAX_HOLD_DAYS`` (same entry price until exit).
+
+    Realized PnL is written to ``strategy_returns[entry_i]`` when the trade closes.
+    ``signal`` remains the raw model intent (pred > threshold) for plotting.
+    ``entry_trade`` is 1 on bars where a new position opens from flat (not renewals).
     """
     n = int(len(pred))
     signal = (pred > pred_col_threshold).astype(int)
     strategy_returns = np.zeros(n, dtype=float)
+    entry_trade = np.zeros(n, dtype=np.int8)
+    # Mark the exact bar where the position is closed.
+    exit_trade = np.zeros(n, dtype=np.int8)
+    entry_price = np.full(n, np.nan, dtype=float)
+    exit_price = np.full(n, np.nan, dtype=float)
 
     trade_hits = 0
     trade_count = 0
+    completed_returns: list[float] = []
 
-    for i in range(n):
-        if signal[i] == 0:
-            continue
+    open_pos = False
+    entry_i = -1
+    entry_px = 0.0
+    deadline = -1
+    last_idx = n - 1
 
+    def _window_deadline(t: int) -> int:
+        return min(t + MAX_HOLD_DAYS, last_idx)
+
+    def _timeout_exit_price(exit_t: int) -> float:
+        """
+        Practical timeout/expiry exit: liquidate at the deadline bar.
+        Use midpoint (high+low)/2 when finite, otherwise fall back to close, then entry.
+        """
+        hi = float(high[exit_t])
+        lo = float(low[exit_t])
+        if np.isfinite(hi) and np.isfinite(lo):
+            return 0.5 * (hi + lo)
+        cl = float(close[exit_t])
+        if np.isfinite(cl):
+            return cl
+        return float(entry_px)
+
+    def _close_trade(ret: float, hit_tp: bool, *, exit_t: int, exit_px: float) -> None:
+        nonlocal open_pos, trade_count, trade_hits
+        strategy_returns[entry_i] = ret
+        exit_trade[exit_t] = 1
+        exit_price[exit_t] = float(exit_px)
+        completed_returns.append(float(ret))
         trade_count += 1
-        entry_price = float(close[i])
-        tp_price = entry_price * (1 + TP_PCT)
-        sl_price = entry_price * (1 - SL_PCT)
-
-        trade_result = 0
-        for j in range(1, MAX_HOLD_DAYS + 1):
-            if i + j >= n:
-                break
-
-            hi = float(high[i + j])
-            lo = float(low[i + j])
-
-            if hi >= tp_price:
-                strategy_returns[i] = TP_PCT
-                trade_result = 1
-                break
-
-            if lo <= sl_price:
-                strategy_returns[i] = -SL_PCT
-                trade_result = 0
-                break
-
-        if trade_result == 1:
+        if hit_tp:
             trade_hits += 1
+        open_pos = False
+
+    for t in range(n):
+        if open_pos:
+            if t > deadline:
+                # We close when `t > deadline`, but the actual last in-window bar is `deadline`.
+                # Mark the exit on `deadline` for accurate UI history.
+                exit_t = int(deadline)
+                px = _timeout_exit_price(exit_t)
+                ret = (px / entry_px) - 1.0 if entry_px > 1e-12 else 0.0
+                _close_trade(
+                    float(ret),
+                    hit_tp=False,
+                    exit_t=exit_t,
+                    exit_px=float(px),
+                )
+            elif t > entry_i:
+                tp_price = entry_px * (1 + TP_PCT)
+                sl_price = entry_px * (1 - SL_PCT)
+                hi = float(high[t])
+                lo = float(low[t])
+                if hi >= tp_price:
+                    _close_trade(
+                        TP_PCT,
+                        hit_tp=True,
+                        exit_t=int(t),
+                        exit_px=float(tp_price),
+                    )
+                elif lo <= sl_price:
+                    _close_trade(
+                        -SL_PCT,
+                        hit_tp=False,
+                        exit_t=int(t),
+                        exit_px=float(sl_price),
+                    )
+            if open_pos and t > entry_i and signal[t] == 1:
+                deadline = _window_deadline(t)
+
+        if not open_pos and signal[t] == 1:
+            open_pos = True
+            entry_i = t
+            entry_px = float(close[t])
+            deadline = _window_deadline(t)
+            entry_trade[t] = 1
+            entry_price[t] = entry_px
+
+    if open_pos:
+        # End-of-series close: treat as timeout at the last `deadline` bar.
+        exit_t = int(deadline)
+        px = _timeout_exit_price(exit_t)
+        ret = (px / entry_px) - 1.0 if entry_px > 1e-12 else 0.0
+        _close_trade(
+            float(ret),
+            hit_tp=False,
+            exit_t=exit_t,
+            exit_px=float(px),
+        )
 
     cum_strategy = np.cumprod(1.0 + strategy_returns)
-    return signal, strategy_returns, cum_strategy, trade_hits, trade_count
+    completed = np.asarray(completed_returns, dtype=float)
+    return (
+        signal,
+        strategy_returns,
+        cum_strategy,
+        trade_hits,
+        trade_count,
+        entry_trade,
+        exit_trade,
+        entry_price,
+        exit_price,
+        completed,
+    )
 
 
 def basic_backtest(
@@ -156,10 +267,15 @@ def basic_backtest(
     df.loc[:, "signal"] = 0
     df.loc[:, "strategy_return"] = 0.0
     df.loc[:, "cum_strategy_return"] = 1.0
+    df.loc[:, "entry_trade"] = 0
+    df.loc[:, "exit_trade"] = 0
+    df.loc[:, "entry_price"] = np.nan
+    df.loc[:, "exit_price"] = np.nan
 
     trade_hits = 0
     trade_count = 0
     cum_return: float = 1.0
+    completed_all: list[float] = []
 
     if pooled_mode:
         # Compute exits (TP/SL) strictly within each symbol to avoid cross-symbol lookahead.
@@ -167,7 +283,7 @@ def basic_backtest(
 
         for sym in symbols:
             sub = df.loc[df["symbol"] == sym]
-            sub_sorted = sub.sort_values(ts_col) if ts_col else sub
+            sub_sorted = _stable_sort_by_timestamp(sub, ts_col) if ts_col else sub
 
             pred = sub_sorted[pred_col].to_numpy(dtype=float)
             close = sub_sorted["close"].to_numpy(dtype=float)
@@ -180,6 +296,11 @@ def basic_backtest(
                 cum_arr,
                 hits,
                 trades,
+                entry_trade_arr,
+                exit_trade_arr,
+                entry_price_arr,
+                exit_price_arr,
+                completed,
             ) = _backtest_single_series(
                 close=close,
                 high=high,
@@ -190,9 +311,14 @@ def basic_backtest(
 
             df.loc[sub_sorted.index, "signal"] = signal_arr
             df.loc[sub_sorted.index, "strategy_return"] = strat_arr
+            df.loc[sub_sorted.index, "entry_trade"] = entry_trade_arr
+            df.loc[sub_sorted.index, "exit_trade"] = exit_trade_arr
+            df.loc[sub_sorted.index, "entry_price"] = entry_price_arr
+            df.loc[sub_sorted.index, "exit_price"] = exit_price_arr
 
             trade_hits += hits
             trade_count += trades
+            completed_all.extend(completed.tolist())
 
         if ts_col:
             # Equal-weight pooled portfolio return per timestamp (like your market eqw_ret):
@@ -212,7 +338,7 @@ def basic_backtest(
             cum_return = float(df["cum_strategy_return"].iloc[-1])
     else:
         # Single symbol case: still sort by timestamp if available.
-        sub_sorted = df.sort_values(ts_col) if ts_col else df
+        sub_sorted = _stable_sort_by_timestamp(df, ts_col) if ts_col else df
         pred = sub_sorted[pred_col].to_numpy(dtype=float)
         close = sub_sorted["close"].to_numpy(dtype=float)
         high = sub_sorted["high"].to_numpy(dtype=float)
@@ -224,6 +350,11 @@ def basic_backtest(
             cum_arr,
             hits,
             trades,
+            entry_trade_arr,
+            exit_trade_arr,
+            entry_price_arr,
+            exit_price_arr,
+            completed,
         ) = _backtest_single_series(
             close=close,
             high=high,
@@ -235,17 +366,27 @@ def basic_backtest(
         df.loc[sub_sorted.index, "signal"] = signal_arr
         df.loc[sub_sorted.index, "strategy_return"] = strat_arr
         df.loc[sub_sorted.index, "cum_strategy_return"] = cum_arr
+        df.loc[sub_sorted.index, "entry_trade"] = entry_trade_arr
+        df.loc[sub_sorted.index, "exit_trade"] = exit_trade_arr
+        df.loc[sub_sorted.index, "entry_price"] = entry_price_arr
+        df.loc[sub_sorted.index, "exit_price"] = exit_price_arr
         trade_hits += hits
         trade_count += trades
         cum_return = float(cum_arr[-1]) if len(cum_arr) else 1.0
+        completed_all = completed.tolist()
 
     # simple market benchmark
     df.loc[:, "market_return"] = df["close"].pct_change().fillna(0)
     df.loc[:, "cum_market_return"] = (1 + df["market_return"]).cumprod()
 
+    _mask_trade_prices(df)
+
     directional_accuracy = (trade_hits / trade_count) * 100 if trade_count > 0 else 0.0
 
-    ext = _extended_trade_metrics(df)
+    ext = _extended_trade_metrics(
+        df,
+        np.asarray(completed_all, dtype=float),
+    )
 
     metrics = {
         "cum_return": float(cum_return),

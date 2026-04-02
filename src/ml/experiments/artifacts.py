@@ -51,7 +51,12 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
         pd.DataFrame({"prob_trade_success": detail["probs"]}).to_csv(
             probs_path, index=False
         )
-        detail["df_backtest"].to_csv(backtest_path, index=False)
+        dfb = detail["df_backtest"]
+        if "symbol" in dfb.columns and "timestamp" in dfb.columns:
+            dfb = dfb.sort_values(["symbol", "timestamp"], kind="mergesort")
+        elif "timestamp" in dfb.columns:
+            dfb = dfb.sort_values(["timestamp"], kind="mergesort")
+        dfb.to_csv(backtest_path, index=False)
 
         if plt is not None:
             plt.figure(figsize=(8, 4))
