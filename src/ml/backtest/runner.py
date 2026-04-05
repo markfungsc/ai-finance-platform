@@ -1,15 +1,66 @@
 import numpy as np
 import pandas as pd
 
-from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
+from constants import (
+    EXPERIMENT_STRATEGY_SLUG,
+    THRESHOLD,
+    THRESHOLD_CALMAR_EPS,
+    THRESHOLD_MAX_MEAN_ABS_DRAWDOWN,
+    THRESHOLD_MIN_AVG_PROFIT_FACTOR,
+    THRESHOLD_OBJECTIVE,
+    THRESHOLD_SELECTION_LAMBDA_DD,
+    THRESHOLD_TRADING_DAYS_PER_TWO_MONTHS,
+)
 from log_config import get_logger
-from ml.backtest.engine import basic_backtest, pooled_eqw_market_cum_return
+from ml.backtest.engine import basic_backtest, pooled_avg_buyhold_market_curve
 from ml.backtest.threshold_optimization import optimize_thresholds
 from ml.backtest.walk_forward import walk_forward_split
 from ml.evaluate import evaluate_model
 from ml.models.save_loads import save_feature_columns, save_model
 
 logger = get_logger(__name__)
+
+
+def _backtest_split_at_threshold(
+    df_pred_for_backtest: pd.DataFrame,
+    df_test_rows: pd.DataFrame,
+    threshold: float,
+    pooled_mode: bool,
+) -> tuple[pd.DataFrame, dict, dict]:
+    """Run basic_backtest and pooled market overlay; per-symbol metrics at same threshold."""
+    df_backtest, metrics_strategy = basic_backtest(
+        df_pred_for_backtest,
+        pred_col="prob_trade_success",
+        threshold=threshold,
+    )
+    if pooled_mode:
+        buyhold_factor, buyhold_path = pooled_avg_buyhold_market_curve(df_test_rows)
+        metrics_strategy["cum_market_return"] = buyhold_factor
+        metrics_strategy["cum_market_return_pooled_eqw"] = buyhold_factor
+        metrics_strategy["market_return_label"] = "pooled_avg_buyhold"
+        if "timestamp" in df_test_rows.columns and not df_backtest.empty:
+            if len(buyhold_path):
+                row_timestamps = pd.Index(df_backtest["timestamp"])
+                mapped = row_timestamps.map(buyhold_path)
+                cum_m = (
+                    pd.Series(mapped, index=df_backtest.index)
+                    .ffill()
+                    .bfill()
+                    .fillna(1.0)
+                )
+                path_ret = buyhold_path.pct_change().fillna(0.0)
+                mapped_r = row_timestamps.map(path_ret).fillna(0.0)
+                df_backtest.loc[:, "cum_market_return_pooled_eqw"] = cum_m
+                df_backtest.loc[:, "cum_market_return"] = cum_m
+                df_backtest.loc[:, "market_return"] = mapped_r.to_numpy(dtype=float)
+    per_symbol_metrics: dict = {}
+    if "symbol" in df_pred_for_backtest.columns:
+        for sym, grp in df_pred_for_backtest.groupby("symbol"):
+            _df_sym, _m_sym = basic_backtest(
+                grp, pred_col="prob_trade_success", threshold=threshold
+            )
+            per_symbol_metrics[str(sym)] = _m_sym
+    return df_backtest, metrics_strategy, per_symbol_metrics
 
 
 def run_backtest(
@@ -23,6 +74,12 @@ def run_backtest(
     test_size=250,
     step_size=250,
     threshold: float = THRESHOLD,
+    threshold_objective: str | None = None,
+    threshold_lambda_dd: float | None = None,
+    threshold_calmar_eps: float | None = None,
+    threshold_min_avg_profit_factor: float | None = None,
+    threshold_max_mean_abs_drawdown: float | None = None,
+    threshold_trading_days_per_two_months: int | None = None,
 ):
     X = X.reset_index(drop=True)
     y = y.reset_index(drop=True)
@@ -57,7 +114,6 @@ def run_backtest(
         )
 
     final_model = None
-    all_backtest_metrics = []
     split_details = []
 
     if pooled_mode:
@@ -130,47 +186,14 @@ def run_backtest(
         df_test["prob_trade_success"] = probs
 
         df_pred_for_backtest = df_test.copy()
-        df_backtest, metrics_strategy = basic_backtest(
-            df_test, pred_col="prob_trade_success", threshold=threshold
-        )
-        if pooled_mode:
-            pooled_eqw_cum_market_return = pooled_eqw_market_cum_return(df_test_rows)
-            metrics_strategy["cum_market_return"] = pooled_eqw_cum_market_return
-            metrics_strategy["cum_market_return_pooled_eqw"] = (
-                pooled_eqw_cum_market_return
+        df_backtest, metrics_strategy, per_symbol_metrics = (
+            _backtest_split_at_threshold(
+                df_pred_for_backtest,
+                df_test_rows,
+                threshold,
+                pooled_mode,
             )
-            metrics_strategy["market_return_label"] = "pooled_equal_weight"
-            if "timestamp" in df_test_rows.columns and not df_backtest.empty:
-                px = df_test_rows.loc[:, ["timestamp", "symbol", "close"]].copy()
-                px = px.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
-                # Single-step `.loc` assignment to avoid pandas CoW/chained-assignment warnings.
-                px.loc[:, "symbol_return"] = px.groupby("symbol", sort=False)[
-                    "close"
-                ].pct_change()
-                eqw_path = (
-                    px.dropna(subset=["symbol_return"])
-                    .groupby("timestamp", sort=True)["symbol_return"]
-                    .mean()
-                )
-                if not eqw_path.empty:
-                    eqw_path = (1.0 + eqw_path).cumprod()
-                    row_timestamps = pd.Index(df_test_rows["timestamp"])
-                    mapped = row_timestamps.map(eqw_path)
-                    df_backtest.loc[:, "cum_market_return_pooled_eqw"] = (
-                        pd.Series(mapped, index=df_backtest.index).ffill().fillna(1.0)
-                    )
-                    df_backtest.loc[:, "cum_market_return"] = df_backtest[
-                        "cum_market_return_pooled_eqw"
-                    ]
-        per_symbol_metrics = {}
-        if "symbol" in df_test.columns:
-            for sym, grp in df_test.groupby("symbol"):
-                _df_sym, _m_sym = basic_backtest(
-                    grp, pred_col="prob_trade_success", threshold=threshold
-                )
-                per_symbol_metrics[str(sym)] = _m_sym
-
-        all_backtest_metrics.append(metrics_strategy)
+        )
         split_details.append(
             {
                 "split": i,
@@ -190,21 +213,70 @@ def run_backtest(
             }
         )
 
+    threshold_optimization = optimize_thresholds(
+        split_details,
+        pooled_mode,
+        objective=threshold_objective or THRESHOLD_OBJECTIVE,
+        lambda_dd=(
+            float(threshold_lambda_dd)
+            if threshold_lambda_dd is not None
+            else float(THRESHOLD_SELECTION_LAMBDA_DD)
+        ),
+        calmar_eps=(
+            float(threshold_calmar_eps)
+            if threshold_calmar_eps is not None
+            else float(THRESHOLD_CALMAR_EPS)
+        ),
+        min_avg_profit_factor=(
+            threshold_min_avg_profit_factor
+            if threshold_min_avg_profit_factor is not None
+            else THRESHOLD_MIN_AVG_PROFIT_FACTOR
+        ),
+        max_mean_abs_drawdown=(
+            threshold_max_mean_abs_drawdown
+            if threshold_max_mean_abs_drawdown is not None
+            else THRESHOLD_MAX_MEAN_ABS_DRAWDOWN
+        ),
+        trading_days_per_two_months=(
+            int(threshold_trading_days_per_two_months)
+            if threshold_trading_days_per_two_months is not None
+            else int(THRESHOLD_TRADING_DAYS_PER_TWO_MONTHS)
+        ),
+    )
+    best_thr = float(threshold_optimization["best_threshold"])
+    for d in split_details:
+        df_b, m_s, per_sym = _backtest_split_at_threshold(
+            d["df_pred_for_backtest"],
+            d["df_test_rows"],
+            best_thr,
+            pooled_mode,
+        )
+        d["df_backtest"] = df_b.copy()
+        d["metrics_strategy"] = m_s
+        d["per_symbol_metrics"] = per_sym
+        d["market_return_label"] = m_s.get("market_return_label", "single_symbol_close")
+        d["backtest_threshold"] = best_thr
+
+    all_backtest_metrics = [d["metrics_strategy"] for d in split_details]
+
+    for d in split_details:
+        m = d["metrics_strategy"]
         logger.info(
-            "split %s strategy | cum_return: %.4f, cum_market_return: %.4f, "
+            "split %s strategy (threshold=%.4f) | cum_return: %.4f, cum_market_return: %.4f, "
             "directional_accuracy: %.2f%% (trades=%s)",
-            i,
-            metrics_strategy["cum_return"],
-            metrics_strategy["cum_market_return"],
-            metrics_strategy["directional_accuracy"],
-            metrics_strategy["strategy_trade_count"],
+            d["split"],
+            d["backtest_threshold"],
+            m["cum_return"],
+            m["cum_market_return"],
+            m["directional_accuracy"],
+            m["strategy_trade_count"],
         )
 
     # Aggregate prediction metrics
     avg_mae = np.mean([r["mae"] for r in results])
     avg_dir = np.mean([r["directional_accuracy"] for r in results])
 
-    # Aggregate backtest metrics
+    # Aggregate backtest metrics (aligned with optimized threshold / saved artifacts)
     def _finite_mean(values, default=0.0):
         m = np.nanmean(values)
         return float(m) if np.isfinite(m) else default
@@ -233,8 +305,6 @@ def run_backtest(
         avg_win_rate = 0.0
         avg_profit_factor = 0.0
         avg_max_drawdown = 0.0
-
-    threshold_optimization = optimize_thresholds(split_details, pooled_mode)
 
     summary = {
         "avg_mae": avg_mae,

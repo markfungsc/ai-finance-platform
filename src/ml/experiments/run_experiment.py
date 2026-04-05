@@ -104,6 +104,10 @@ def run_experiment(model_name: str = "logistic_regression"):
     )
     artifact_paths = save_split_artifacts(summary["split_details"], artifacts_root)
 
+    grid_copy = artifacts_root / "threshold_grid.json"
+    grid_copy.write_text(json.dumps(grid_payload, indent=2), encoding="utf-8")
+    artifact_paths.append(str(grid_copy))
+
     # Optional visualization: threshold objective landscape across the grid.
     grid = summary.get("threshold_optimization", {}).get("grid", []) or []
     if plt is not None and grid:

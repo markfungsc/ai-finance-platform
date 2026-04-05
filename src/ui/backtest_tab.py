@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections import deque
@@ -374,26 +375,118 @@ def build_trade_pnl_table(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plotly_summary_merged(summ: pd.DataFrame) -> go.Figure:
+def plotly_equity_per_symbol_vs_market(
+    df: pd.DataFrame, symbol: str
+) -> go.Figure | None:
+    """
+    One symbol's strategy equity vs that symbol's buy-and-hold.
+
+    In pooled CSVs, ``cum_strategy_return`` / ``cum_market_return`` are portfolio
+    benchmarks repeated on every row; per-symbol curves are rebuilt from
+    ``strategy_return`` and ``close`` when multiple symbols are present.
+    """
+    if "timestamp" not in df.columns or "symbol" not in df.columns:
+        return None
+    d = df.loc[df["symbol"].astype(str) == str(symbol)].copy()
+    if d.empty:
+        return None
+    d = d.sort_values("timestamp")
+    x = d["timestamp"]
+
+    pooled_multi = int(df["symbol"].nunique()) > 1
+
+    if pooled_multi and "strategy_return" in d.columns:
+        sr = pd.to_numeric(d["strategy_return"], errors="coerce").fillna(0.0)
+        y_strat = (1.0 + sr).cumprod()
+    elif "cum_strategy_return" in d.columns:
+        y_strat = pd.to_numeric(d["cum_strategy_return"], errors="coerce")
+    else:
+        return None
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=summ["split"],
-            y=summ["cum_strategy_end"],
+            x=x,
+            y=y_strat,
+            name="Strategy (symbol)",
+            mode="lines",
+        )
+    )
+
+    if pooled_multi and "close" in d.columns:
+        cl = pd.to_numeric(d["close"], errors="coerce")
+        if cl.notna().any():
+            c0 = float(cl.dropna().iloc[0])
+            if c0 > 1e-12:
+                y_mkt = cl / c0
+            else:
+                y_mkt = pd.Series(1.0, index=d.index)
+            y_mkt = y_mkt.ffill().bfill().fillna(1.0)
+        else:
+            y_mkt = pd.Series(1.0, index=d.index)
+        mkt_name = "Market (symbol buy-hold)"
+    else:
+        mcol = (
+            "cum_market_return"
+            if "cum_market_return" in d.columns
+            else "cum_market_return_pooled_eqw"
+        )
+        if mcol not in d.columns:
+            fig.update_layout(
+                title=f"Cumulative return — {symbol}: strategy vs market",
+                height=400,
+                hovermode="x unified",
+                legend=dict(orientation="h", y=1.1),
+            )
+            return fig
+        y_mkt = pd.to_numeric(d[mcol], errors="coerce")
+        mkt_name = "Market (symbol)"
+
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y_mkt,
+            name=mkt_name,
+            mode="lines",
+        )
+    )
+    fig.update_layout(
+        title=f"Cumulative return — {symbol}: strategy vs market",
+        height=400,
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.1),
+    )
+    return fig
+
+
+def plotly_summary_strategy_market_traces(
+    splits,
+    strategy_y,
+    market_y,
+    *,
+    title: str,
+    strategy_name: str = "Strategy end cum",
+    market_name: str = "Market end cum",
+) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=splits,
+            y=strategy_y,
             mode="lines+markers",
-            name="Strategy end cum",
+            name=strategy_name,
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=summ["split"],
-            y=summ["cum_market_end"],
+            x=splits,
+            y=market_y,
             mode="lines+markers",
-            name="Market end cum",
+            name=market_name,
         )
     )
     fig.update_layout(
-        title="All splits: strategy vs market (end cumulative return)",
+        title=title,
         xaxis_title="Split",
         yaxis_title="Cumulative return (×)",
         hovermode="x unified",
@@ -401,6 +494,41 @@ def plotly_summary_merged(summ: pd.DataFrame) -> go.Figure:
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
+
+
+def plotly_summary_merged(summ: pd.DataFrame) -> go.Figure:
+    return plotly_summary_strategy_market_traces(
+        summ["split"],
+        summ["cum_strategy_end"],
+        summ["cum_market_end"],
+        title="All splits: strategy vs market (end cumulative return)",
+        strategy_name="Strategy end cum",
+        market_name="Market end cum",
+    )
+
+
+def load_threshold_grid_json(artifacts_root: Path) -> dict | None:
+    p = artifacts_root / "threshold_grid.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def per_split_series_from_grid_row(
+    row: dict,
+) -> tuple[list[int], list[float], list[float]] | None:
+    ps = row.get("per_split")
+    if not ps or not isinstance(ps, list):
+        return None
+    ordered = sorted(ps, key=lambda r: int(r["split"]))
+    return (
+        [int(r["split"]) for r in ordered],
+        [float(r["cum_return"]) for r in ordered],
+        [float(r["cum_market_return"]) for r in ordered],
+    )
 
 
 def plotly_trade_equity_by_symbol(df: pd.DataFrame) -> go.Figure | None:
@@ -444,13 +572,14 @@ def plotly_split_panels(
         rows=3,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.07,
-        row_heights=[0.52, 0.24, 0.24],
+        vertical_spacing=0.12,
+        row_heights=[0.46, 0.30, 0.24],
         subplot_titles=(
-            f"Price & entries — {title_sym}",
+            f"Price, volume & entries — {title_sym}",
             "MACD",
             "RSI (14)",
         ),
+        specs=[[{"secondary_y": True}], [{}], [{}]],
     )
 
     if "high" in g.columns and "low" in g.columns:
@@ -483,7 +612,22 @@ def plotly_split_panels(
         ),
         row=1,
         col=1,
+        secondary_y=False,
     )
+    if "volume" in g.columns:
+        vol = pd.to_numeric(g["volume"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        fig.add_trace(
+            go.Bar(
+                x=x,
+                y=vol,
+                name="Volume",
+                marker=dict(color="rgba(80, 120, 200, 0.35)"),
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
     for col, nm, dash in (
         ("ema_10", "EMA 10", None),
         ("ema_20", "EMA 20", "dash"),
@@ -702,15 +846,24 @@ def plotly_split_panels(
     fig.add_hline(y=70, line_dash="dot", line_color="gray", row=3, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="gray", row=3, col=1)
 
-    fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="MACD", row=2, col=1)
-    fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(
+        title_text="Volume",
+        row=1,
+        col=1,
+        secondary_y=True,
+        showgrid=False,
+        zeroline=False,
+    )
+    fig.update_yaxes(title_text="MACD", row=2, col=1, automargin=True)
+    fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100], automargin=True)
 
     # Trading-style navigation + hover alignment (Price & TA panel only).
     fig.update_layout(
-        height=820,
+        height=1020,
+        margin=dict(t=64, b=48),
         showlegend=True,
-        legend=dict(orientation="h", y=1.14),
+        legend=dict(orientation="h", y=1.18),
         hovermode="x unified",
         uirevision=f"price_ta_{title_sym}",
         dragmode="pan",
@@ -718,7 +871,7 @@ def plotly_split_panels(
 
     # Timestamp navigator under the price chart (top row).
     xaxis_extras: dict = {
-        "rangeslider": dict(visible=True, thickness=0.08),
+        "rangeslider": dict(visible=True, thickness=0.06),
     }
     if "timestamp" in g.columns:
         ts_check = pd.to_datetime(g["timestamp"], utc=True, errors="coerce")
@@ -789,7 +942,61 @@ def render(artifacts_root_str: str) -> None:
         st.dataframe(summ, use_container_width=True)
         plot_df = summ[summ["cum_strategy_end"].notna()].copy()
         if not plot_df.empty and "cum_strategy_end" in plot_df.columns:
-            st.plotly_chart(plotly_summary_merged(plot_df), use_container_width=True)
+            grid_bundle = load_threshold_grid_json(artifacts_root)
+            grid_rows: list[dict] = []
+            if grid_bundle and isinstance(grid_bundle.get("grid"), list):
+                for r in grid_bundle["grid"]:
+                    if r.get("per_split") and per_split_series_from_grid_row(r):
+                        grid_rows.append(r)
+                grid_rows.sort(key=lambda row: float(row.get("threshold", 0.0)))
+
+            strat_labels = ["Saved split backtests (CSVs)"]
+            best_thr = (
+                float(grid_bundle["best_threshold"])
+                if grid_bundle and grid_bundle.get("best_threshold") is not None
+                else None
+            )
+            for r in grid_rows:
+                t = float(r["threshold"])
+                tag = f"Grid replay τ={t:.3g}"
+                if best_thr is not None and abs(t - best_thr) < 1e-9:
+                    tag += " (objective pick)"
+                strat_labels.append(tag)
+
+            if len(strat_labels) > 1:
+                strategy_source = st.selectbox(
+                    "Strategy curve source",
+                    list(range(len(strat_labels))),
+                    format_func=lambda i: strat_labels[i],
+                    key="summary_strategy_threshold_mode",
+                )
+            else:
+                strategy_source = 0
+
+            if strategy_source == 0:
+                fig_sum = plotly_summary_merged(plot_df)
+            else:
+                row = grid_rows[strategy_source - 1]
+                pcs = per_split_series_from_grid_row(row)
+                xs, ys, ym = pcs  # type: ignore[misc]
+                thr_f = float(row["threshold"])
+                fig_sum = plotly_summary_strategy_market_traces(
+                    xs,
+                    ys,
+                    ym,
+                    title=(
+                        "All splits: strategy vs market "
+                        f"(threshold grid τ={thr_f:.3g}, end cum per split)"
+                    ),
+                    strategy_name=f"Strategy (τ={thr_f:.3g})",
+                    market_name="Market (per split)",
+                )
+            st.plotly_chart(fig_sum, use_container_width=True)
+            if grid_rows and strategy_source != 0:
+                st.caption(
+                    "Strategy/market points come from `threshold_grid.json` (replay). "
+                    "Saved split CSVs still reflect the run's chosen backtest threshold."
+                )
         if (
             "cum_strategy_end" in summ.columns
             and summ["cum_strategy_end"].notna().any()
@@ -877,6 +1084,18 @@ def render(artifacts_root_str: str) -> None:
             legend=dict(orientation="h", y=1.1),
         )
         st.plotly_chart(fig, use_container_width=True)
+
+        if pooled and "symbol" in df.columns:
+            symbols_eq = sorted(df["symbol"].dropna().astype(str).unique())
+            if len(symbols_eq) > 1:
+                sym_eq = st.selectbox(
+                    "Per-symbol equity (vs symbol market)",
+                    symbols_eq,
+                    key="equity_per_symbol",
+                )
+                fig_sym = plotly_equity_per_symbol_vs_market(df, sym_eq)
+                if fig_sym is not None:
+                    st.plotly_chart(fig_sym, use_container_width=True)
 
     with sub_px:
         symbols: list[str] = []

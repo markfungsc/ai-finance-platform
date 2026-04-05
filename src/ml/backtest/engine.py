@@ -25,27 +25,41 @@ def _mask_trade_prices(df: pd.DataFrame) -> None:
     df.loc[:, "exit_price"] = xp
 
 
-def pooled_eqw_market_cum_return(df_test_rows: pd.DataFrame) -> float:
-    """Equal-weight pooled market cumulative return (same as walk-forward pooled mode)."""
+def pooled_avg_buyhold_market_curve(
+    df_test_rows: pd.DataFrame,
+) -> tuple[float, pd.Series]:
+    """
+    Pooled market benchmark: per symbol, buy-and-hold growth ``close/close_first`` on
+    the window; at each timestamp the curve is the **mean** of those ratios across
+    symbols (equal-weight). The terminal value is ``1 + mean(total_return_i)``.
+
+    Returns ``(end_factor, series indexed by timestamp)`` for plotting/mapping to rows.
+    """
     if df_test_rows.empty:
-        return 1.0
+        return 1.0, pd.Series(dtype=float)
     required = {"timestamp", "symbol", "close"}
     if not required.issubset(df_test_rows.columns):
-        return 1.0
+        return 1.0, pd.Series(dtype=float)
 
     px = df_test_rows.loc[:, ["timestamp", "symbol", "close"]].copy()
-    px = px.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
-    # Use a single-step `.loc` assignment to avoid pandas CoW/chained-assignment
-    # warnings in newer versions.
-    px.loc[:, "symbol_return"] = px.groupby("symbol", sort=False)["close"].pct_change()
-    eqw_ret = (
-        px.dropna(subset=["symbol_return"])
-        .groupby("timestamp", sort=True)["symbol_return"]
-        .mean()
+    px = px.sort_values(["symbol", "timestamp"], kind="mergesort").reset_index(
+        drop=True
     )
-    if eqw_ret.empty:
-        return 1.0
-    return float((1.0 + eqw_ret).cumprod().iloc[-1])
+    first_close = px.groupby("symbol", sort=False)["close"].transform("first")
+    px.loc[:, "norm_close"] = np.where(
+        first_close.to_numpy(dtype=float) > 1e-12,
+        px["close"].to_numpy(dtype=float) / first_close.to_numpy(dtype=float),
+        1.0,
+    )
+    curve = px.groupby("timestamp", sort=True)["norm_close"].mean()
+    end_factor = float(curve.iloc[-1]) if len(curve) else 1.0
+    return end_factor, curve
+
+
+def pooled_avg_buyhold_market_factor(df_test_rows: pd.DataFrame) -> float:
+    """Terminal growth factor from :func:`pooled_avg_buyhold_market_curve`."""
+    factor, _ = pooled_avg_buyhold_market_curve(df_test_rows)
+    return factor
 
 
 def _extended_trade_metrics(
@@ -375,9 +389,28 @@ def basic_backtest(
         cum_return = float(cum_arr[-1]) if len(cum_arr) else 1.0
         completed_all = completed.tolist()
 
-    # simple market benchmark
-    df.loc[:, "market_return"] = df["close"].pct_change().fillna(0)
-    df.loc[:, "cum_market_return"] = (1 + df["market_return"]).cumprod()
+    # Market benchmark: buy-and-hold (first close -> current), not daily compound.
+    if pooled_mode:
+        df.loc[:, "market_return"] = 0.0
+        df.loc[:, "cum_market_return"] = 1.0
+    else:
+        sub_m = _stable_sort_by_timestamp(df, ts_col) if ts_col else df
+        cl = sub_m["close"].to_numpy(dtype=float)
+        n = len(cl)
+        if n == 0:
+            df.loc[:, "market_return"] = 0.0
+            df.loc[:, "cum_market_return"] = 1.0
+        else:
+            c0 = float(cl[0])
+            if c0 <= 1e-12:
+                norm = np.ones(n, dtype=float)
+            else:
+                norm = cl / c0
+            df.loc[sub_m.index, "cum_market_return"] = norm
+            mr = np.zeros(n, dtype=float)
+            if n > 1:
+                mr[1:] = norm[1:] / norm[:-1] - 1.0
+            df.loc[sub_m.index, "market_return"] = mr
 
     _mask_trade_prices(df)
 

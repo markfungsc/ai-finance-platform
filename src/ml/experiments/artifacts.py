@@ -8,6 +8,11 @@ except ImportError:  # pragma: no cover - optional plotting dependency
     plt = None
 
 
+POOLED_PORTFOLIO_MARKET_LABELS = frozenset(
+    {"pooled_equal_weight", "pooled_avg_buyhold"}
+)
+
+
 def _dedupe_pooled_timestamp_for_plot(df: pd.DataFrame) -> pd.DataFrame:
     """
     For pooled runs, strategy/market equity values repeat for each symbol row at the
@@ -58,6 +63,11 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
             dfb = dfb.sort_values(["timestamp"], kind="mergesort")
         dfb.to_csv(backtest_path, index=False)
 
+        thr_path = split_dir / "backtest_threshold.txt"
+        bt = detail.get("backtest_threshold")
+        if bt is not None:
+            thr_path.write_text(f"{float(bt)}\n", encoding="utf-8")
+
         if plt is not None:
             plt.figure(figsize=(8, 4))
             plt.hist(detail["probs"], bins=50)
@@ -72,7 +82,7 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
 
             df_backtest = detail["df_backtest"]
             pooled_ready = (
-                market_label == "pooled_equal_weight"
+                market_label in POOLED_PORTFOLIO_MARKET_LABELS
                 and "timestamp" in df_backtest.columns
                 and "cum_strategy_return" in df_backtest.columns
             )
@@ -87,15 +97,19 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
             market_series_col = (
                 "cum_market_return_pooled_eqw"
                 if (
-                    market_label == "pooled_equal_weight"
+                    market_label in POOLED_PORTFOLIO_MARKET_LABELS
                     and "cum_market_return_pooled_eqw" in df_backtest.columns
                 )
                 else "cum_market_return"
             )
             market_plot_label = (
-                "Market (pooled equal-weight)"
-                if market_label == "pooled_equal_weight"
-                else "Market"
+                "Market (pooled avg buy-hold)"
+                if market_label == "pooled_avg_buyhold"
+                else (
+                    "Market (pooled equal-weight)"
+                    if market_label == "pooled_equal_weight"
+                    else "Market"
+                )
             )
             if pooled_ready:
                 plt.plot(x, plot_df[market_series_col], label=market_plot_label)
@@ -110,7 +124,7 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
             plt.close()
 
             pooled_ready = (
-                market_label == "pooled_equal_weight"
+                market_label in POOLED_PORTFOLIO_MARKET_LABELS
                 and "symbol" in df_backtest.columns
                 and "close" in df_backtest.columns
                 and "strategy_return" in df_backtest.columns
@@ -130,14 +144,19 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
                 for sym in symbols:
                     m = by_symbol["symbol"].astype(str) == sym
                     sub = by_symbol.loc[m].copy()
-                    market_ret = sub["close"].pct_change().fillna(0.0)
+                    c0 = float(sub["close"].iloc[0])
+                    if c0 > 1e-12:
+                        cum_mkt_series = sub["close"].astype(float) / c0
+                    else:
+                        cum_mkt_series = pd.Series(1.0, index=sub.index)
+                    market_ret = cum_mkt_series.pct_change().fillna(0.0)
                     extra = pd.DataFrame(
                         {
                             "cum_strategy_return_symbol": (
                                 1.0 + sub["strategy_return"]
                             ).cumprod(),
                             "market_return_symbol": market_ret,
-                            "cum_market_return_symbol": (1.0 + market_ret).cumprod(),
+                            "cum_market_return_symbol": cum_mkt_series,
                         },
                         index=sub.index,
                     )
@@ -189,6 +208,8 @@ def save_split_artifacts(split_details: list[dict], output_dir: Path) -> list[st
                 str(backtest_path),
             ]
         )
+        if bt is not None:
+            artifact_paths.append(str(thr_path))
         if plt is not None:
             artifact_paths.extend([str(probs_hist_path), str(cumret_path)])
             if cumret_by_symbol_path.exists():
