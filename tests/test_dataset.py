@@ -151,8 +151,12 @@ class TestLoadDataset:
         df_msft = _make_features_df(n=n, symbol="MSFT")
         df_msft.loc[:, "timestamp"] = df_msft["timestamp"] + pd.Timedelta("1D")
 
-        z_aapl = _make_z_df(df_aapl["timestamp"], z_marker=10.0, symbol="AAPL").iloc[::-1]
-        z_msft = _make_z_df(df_msft["timestamp"], z_marker=20.0, symbol="MSFT").iloc[::-1]
+        z_aapl = _make_z_df(df_aapl["timestamp"], z_marker=10.0, symbol="AAPL").iloc[
+            ::-1
+        ]
+        z_msft = _make_z_df(df_msft["timestamp"], z_marker=20.0, symbol="MSFT").iloc[
+            ::-1
+        ]
 
         feature_by_symbol = {"AAPL": df_aapl, "MSFT": df_msft}
         z_by_symbol = {"AAPL": z_aapl, "MSFT": z_msft}
@@ -161,7 +165,9 @@ class TestLoadDataset:
 
         def _assert_sorted_and_attach(df_z_in: pd.DataFrame) -> pd.DataFrame:
             sorted_copy = (
-                df_z_in.sort_values(["symbol", "timestamp"]).reset_index(drop=True).copy()
+                df_z_in.sort_values(["symbol", "timestamp"])
+                .reset_index(drop=True)
+                .copy()
             )
             pd.testing.assert_frame_equal(
                 df_z_in.reset_index(drop=True), sorted_copy, check_like=False

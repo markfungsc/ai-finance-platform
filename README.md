@@ -25,9 +25,21 @@ What works end-to-end today (local, Postgres-backed):
 - **Training:** `make train` runs [`src/scripts/run_train.py`](src/scripts/run_train.py) (scikit-learn RandomForest, joblib artifact under `models/`).
 - **Evaluation & backtest:** metrics via [`src/ml/evaluate.py`](src/ml/evaluate.py); `make backtest` and `make walk-forward` exercise [`src/ml/backtest/`](src/ml/backtest/).
 - **Inference (CLI):** `make predict` runs [`src/ml/inference/predict.py`](src/ml/inference/predict.py) (optional merge debug output for inspection).
+- **Optional news sentiment:** [`src/ml/sentiment/`](src/ml/sentiment/) — FinBERT scores on yfinance headlines, rolled to `news_sentiment_mean_z` and joined in training/predict when a Parquet cache exists; missing cache → neutral `0.0`. See **News sentiment (optional)** below.
+
 - **Tests & lint:** `make test` (pytest), `make lint` / `make fmt` (Ruff).
 
 Not here yet: HTTP inference API, containerized app service, experiment tracking, and automated promotion (see roadmap).
+
+
+
+### News sentiment (optional)
+
+1. Install NLP stack (PyTorch + Transformers): `pip install -r requirements-nlp.txt` (base `requirements.txt` includes `pyarrow` for reading/writing the cache).
+2. Build cache (from repo root, `PYTHONPATH=src`): `python -m ml.sentiment --symbols AAPL MSFT` (defaults to `TRAIN_SYMBOLS`; add `--max-bars N`, `--no-score` for structure-only rows, `--output PATH`).
+3. Default cache path: `data/sentiment/daily_sentiment.parquet`. Training (`load_train_dataset` / `load_dataset`) and CLI predict attach `news_sentiment_mean_z` after market context; **retrain** saved models so `FEATURE_COLUMNS` joblibs match the widened feature matrix.
+
+**Postgres + Qdrant path (preferred for durable news):** Run `make migrate` (includes [`008_news_sentiment.sql`](infra/migrations/008_news_sentiment.sql) and [`009_daily_sentiment_horizons.sql`](infra/migrations/009_daily_sentiment_horizons.sql)). Start Qdrant with `docker compose` (`finance_qdrant` on port 6333). Ingest headlines: `make news-ingest` (yfinance latest) or free historical backfill: `make news-backfill-free FROM=2015-01-01 TO=2026-03-27 SYM=AAPL PROVIDER=hybrid` (`PROVIDER`: `gdelt`, `sec`, `hybrid`). Recompute gold features (`rollup_daily`: per-symbol rolling z for horizons/volume/volatility; see `src/ml/sentiment/rollup_daily.py`): `make sentiment-rollup`. Optional embeddings: `pip install -r requirements-nlp.txt` then `make embed-news-qdrant SYM=AAPL`. `attach_sentiment_features` reads **`daily_symbol_sentiment` in Postgres first** (when `DATABASE_URL` is set), then falls back to the Parquet cache. For no-coverage periods (e.g., pre-2015), rollup writes neutral sentiment values for full feature timelines.
 
 ## Strategic roadmap
 
@@ -38,7 +50,7 @@ Status: **Delivered** · **In flight** · **Planned**
 | **W1** | Core data path + baseline ML artifact | **In flight** — data + features + **local** train / eval / backtest / CLI predict **delivered**; **serving API** and registry **planned** |
 | **W2** | Inference API + service packaging | **In flight** — database containerized; **HTTP inference** and full stack images **planned** |
 | **W4** | Experiment tracking & reproducibility | **Planned** — MLflow-class runs, metrics, model lineage |
-| **W6** | Transformer-based financial sentiment | **Planned** — news → scores → joinable features |
+| **W6** | Transformer-based financial sentiment | **In flight** — FinBERT + cache + `news_sentiment_mean_z` in dataset/predict; full data coverage TBD |
 | **W8** | Time-series / gradient-boosted forecasting | **Planned** — comparative evaluation under same tracking layer |
 | **W10** | RAG assistant over curated documents | **Planned** — retrieval + LLM, guardrails |
 | **W12** | Automated training & promotion | **Planned** — scheduled pipelines (e.g. Airflow-class) |

@@ -88,8 +88,17 @@ class TestRowwiseCrossSectionalZscore:
 
 
 class TestRunFeaturePipeline:
+    @patch(
+        "data_pipeline.features.build_features.get_features_zscore_count",
+        return_value=1,
+    )
+    @patch("data_pipeline.features.build_features.get_features_count", return_value=1)
     @patch("data_pipeline.features.build_features.upsert_features_z")
     @patch("data_pipeline.features.build_features.upsert_features")
+    @patch(
+        "data_pipeline.features.build_features.delete_incomplete_stock_feature_zscore_rows",
+        return_value=0,
+    )
     @patch(
         "data_pipeline.features.build_features.delete_incomplete_stock_feature_rows",
         return_value=0,
@@ -99,8 +108,11 @@ class TestRunFeaturePipeline:
         self,
         mock_fetch: object,
         _mock_delete: object,
+        _mock_delete_z: object,
         mock_upsert: object,
         mock_upsert_z: object,
+        _mock_fc: object,
+        _mock_fz: object,
     ) -> None:
         mock_fetch.return_value = _synthetic_ohlc_frame(400)
 

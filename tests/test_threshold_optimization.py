@@ -5,9 +5,8 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import numpy as np
-import pytest
-
 import pandas as pd
+import pytest
 
 from ml.backtest.threshold_optimization import (
     OBJECTIVE_AVG_CUM_RETURN,
@@ -71,9 +70,9 @@ def test_threshold_selection_score_avg_and_median():
 
 def test_threshold_selection_score_maximin():
     agg = aggregate_split_metrics([_m(1.5, -0.05, 3), _m(1.05, -0.02, 3)])
-    assert threshold_selection_score(agg, OBJECTIVE_MAXIMIN_CUM_RETURN) == pytest.approx(
-        1.05
-    )
+    assert threshold_selection_score(
+        agg, OBJECTIVE_MAXIMIN_CUM_RETURN
+    ) == pytest.approx(1.05)
 
 
 def test_threshold_selection_score_calmar_proxy():
@@ -297,6 +296,7 @@ def test_optimize_thresholds_reports_trade_floor_metadata():
     assert out["min_total_trades_effective"] == 5
     assert out["total_backtest_trading_days"] == 0
 
+
 def test_grid_includes_per_split_metrics():
     split_details = [
         {"df_pred_for_backtest": None, "df_test_rows": None, "split": 7},
@@ -322,4 +322,3 @@ def test_grid_includes_per_split_metrics():
     assert len(row["per_split"]) == 2
     assert [p["split"] for p in row["per_split"]] == [7, 8]
     assert row["per_split"][0]["cum_return"] == pytest.approx(1.1)
-

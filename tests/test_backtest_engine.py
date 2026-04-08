@@ -16,7 +16,18 @@ def test_two_early_signals_single_round_trip_no_tp() -> None:
     pred[0] = 0.5
     pred[1] = 0.5
 
-    _, strat, _, hits, count, entry_trade, exit_trade, entry_price, exit_price, completed = _backtest_single_series(
+    (
+        _,
+        strat,
+        _,
+        hits,
+        count,
+        entry_trade,
+        exit_trade,
+        entry_price,
+        exit_price,
+        completed,
+    ) = _backtest_single_series(
         close=close,
         high=high,
         low=low,
@@ -50,7 +61,18 @@ def test_renewal_extends_window_tp_later_than_first_deadline() -> None:
     pred[0] = 0.5
     pred[5] = 0.5
 
-    _, strat, _, hits, count, entry_trade, exit_trade, entry_price, exit_price, completed = _backtest_single_series(
+    (
+        _,
+        strat,
+        _,
+        hits,
+        count,
+        entry_trade,
+        exit_trade,
+        entry_price,
+        exit_price,
+        completed,
+    ) = _backtest_single_series(
         close=close,
         high=high,
         low=low,
@@ -83,12 +105,14 @@ def test_without_renewal_trade_expires_before_tp_bar() -> None:
     pred = np.zeros(n)
     pred[0] = 0.5
 
-    _, strat, _, hits, count, _, exit_trade, _, exit_price, completed = _backtest_single_series(
-        close=close,
-        high=high,
-        low=low,
-        pred=pred,
-        pred_col_threshold=float(THRESHOLD),
+    _, strat, _, hits, count, _, exit_trade, _, exit_price, completed = (
+        _backtest_single_series(
+            close=close,
+            high=high,
+            low=low,
+            pred=pred,
+            pred_col_threshold=float(THRESHOLD),
+        )
     )
 
     assert count == 1
@@ -116,7 +140,18 @@ def test_timeout_realizes_midpoint_return_at_deadline() -> None:
     pred = np.zeros(n)
     pred[0] = 0.5
 
-    _, strat, _, hits, count, entry_trade, exit_trade, entry_price, exit_price, completed = _backtest_single_series(
+    (
+        _,
+        strat,
+        _,
+        hits,
+        count,
+        entry_trade,
+        exit_trade,
+        entry_price,
+        exit_price,
+        completed,
+    ) = _backtest_single_series(
         close=close,
         high=high,
         low=low,

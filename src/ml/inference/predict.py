@@ -5,6 +5,7 @@ from database.queries import fetch_features, fetch_features_z
 from ml.helpers.attach_market_context import attach_market_context
 from ml.helpers.merge_features import merge_features_with_target
 from ml.models.save_loads import load_model
+from ml.sentiment.attach import attach_sentiment_features
 
 
 def generate_predictions(model, X: pd.DataFrame) -> np.ndarray:
@@ -58,8 +59,9 @@ def predict_for_symbol(
     df = fetch_features(symbol)
     df_z = fetch_features_z(symbol)
 
-    # attach market context
+    # attach market context and optional sentiment z-scores
     df_z_context = attach_market_context(df_z)
+    df_z_context = attach_sentiment_features(df_z_context)
 
     X, y_actual, df_merged = merge_features_with_target(
         df, df_z_context, debug=debug_merge

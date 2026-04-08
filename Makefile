@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm
+.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free sentiment-rollup embed-news-qdrant
 
 up:
 	cd infra && docker compose up -d
@@ -41,6 +41,21 @@ view-results:
 
 predict:
 	export PYTHONPATH=src && python src/ml/inference/predict.py
+
+sentiment-cache:
+	export PYTHONPATH=src && python src/ml/sentiment/__main__.py
+
+news-ingest:
+	export PYTHONPATH=src && python src/data_pipeline/news/ingest.py --score-finbert
+
+news-backfill-free:
+	@echo 'Usage: make news-backfill-free FROM=2015-01-01 TO=2026-03-27 SYM=AAPL PROVIDER=hybrid' && export PYTHONPATH=src && python src/data_pipeline/news/ingest.py --provider $${PROVIDER:-hybrid} --score-finbert --from-date $${FROM:-2015-01-01} --to-date $${TO:-$$(date +%F)} --symbols $${SYM:-AAPL}
+
+sentiment-rollup:
+	export PYTHONPATH=src && python src/ml/sentiment/rollup_daily.py
+
+embed-news-qdrant:
+	@echo 'Usage: make embed-news-qdrant SYM=AAPL' && export PYTHONPATH=src && python src/ml/sentiment/embed_sync.py --symbol $${SYM:-AAPL}
 
 serve-api:
 	export PYTHONPATH=src && uvicorn api.main:app --host 0.0.0.0 --port 8000

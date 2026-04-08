@@ -163,7 +163,6 @@ def test_build_trade_pnl_table_nan_entry_price_falls_back_to_close():
     assert tbl.iloc[0]["exit_price"] == 100.0 * (1.0 + 0.1)
 
 
-
 def test_build_trade_pnl_table_fifo_exit_before_entry_same_bar():
     """Same bar: exit prior trade then open next; pairing must not swap rows."""
     df = pd.DataFrame(

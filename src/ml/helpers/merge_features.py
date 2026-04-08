@@ -3,6 +3,7 @@ import pandas as pd
 from log_config import get_logger
 from ml.features import (
     FEATURE_COLUMNS_MARKET_CONTEXT_Z,
+    FEATURE_COLUMNS_SENTIMENT_Z,
     FEATURE_COLUMNS_Z,
     TARGET_COLUMN,
 )
@@ -57,9 +58,11 @@ def merge_features_with_target(
     if debug:
         _debug_print_tail("df_labeled", df_labeled)
 
-    X = df_labeled[FEATURE_COLUMNS_Z + FEATURE_COLUMNS_MARKET_CONTEXT_Z].reset_index(
-        drop=True
-    )
+    X = df_labeled[
+        FEATURE_COLUMNS_Z
+        + FEATURE_COLUMNS_MARKET_CONTEXT_Z
+        + FEATURE_COLUMNS_SENTIMENT_Z
+    ].reset_index(drop=True)
     y = df_labeled[TARGET_COLUMN].reset_index(drop=True)
     df_labeled = df_labeled.reset_index(drop=True)
 

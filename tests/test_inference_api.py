@@ -1,8 +1,7 @@
 """Tests for ml.inference.api_inference and api.main FastAPI app."""
 
-import json
-
 import importlib
+import json
 from unittest.mock import patch
 
 import joblib

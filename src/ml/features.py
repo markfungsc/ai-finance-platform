@@ -16,6 +16,16 @@ FEATURE_COLUMNS_MARKET_CONTEXT = [
     "vix_sma_20",
 ]
 
+# Sentiment: DB/rollup uses per-symbol rolling z (see rollup_daily); names kept without _z suffix.
+FEATURE_COLUMNS_SENTIMENT_Z = [
+    "news_sentiment_mean_z",
+    "sentiment_1h",
+    "sentiment_24h",
+    "sentiment_3d",
+    "news_volume",
+    "sentiment_volatility",
+]
+
 FEATURE_COLUMNS_MARKET_CONTEXT_Z = [
     "spy_return_1d_z",
     "spy_return_5d_z",

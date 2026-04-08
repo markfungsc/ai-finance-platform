@@ -5,6 +5,7 @@ from database.queries import fetch_features, fetch_features_z
 from log_config import get_logger
 from ml.helpers.attach_market_context import attach_market_context
 from ml.helpers.merge_features import merge_features_with_target
+from ml.sentiment.attach import attach_sentiment_features
 
 logger = get_logger(__name__)
 
@@ -24,6 +25,7 @@ def load_train_dataset(debug_merge: bool = False):
     df_z_all = df_z_all.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     # single context attach
     df_z_ctx = attach_market_context(df_z_all)
+    df_z_ctx = attach_sentiment_features(df_z_ctx)
     if "symbol" in df_z_ctx.columns and "timestamp" in df_z_ctx.columns:
         shared_ts = (
             df_z_ctx.groupby("timestamp")["symbol"]
@@ -85,6 +87,7 @@ def load_dataset(symbol: str, debug_merge: bool = False, quiet: bool = False):
 
     # attach market context
     df_z_context = attach_market_context(df_z)
+    df_z_context = attach_sentiment_features(df_z_context)
     if not quiet:
         logger.info("Loaded %d rows for %s market context", len(df_z_context), symbol)
 

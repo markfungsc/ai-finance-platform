@@ -34,3 +34,5 @@ urllib3==2.6.3
 uvicorn[standard]==0.34.0
 websockets==16.0
 yfinance==1.2.0
+pyarrow>=15.0.0
+qdrant-client>=1.12.0

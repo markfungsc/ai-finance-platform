@@ -1,0 +1,7 @@
+# Optional: financial NLP sentiment (FinBERT + PyTorch).
+# pip install -r requirements-nlp.txt
+torch>=2.2.0
+transformers>=4.40.0
+safetensors>=0.4.0
+pyarrow>=15.0.0
+sentence-transformers>=3.0.0
