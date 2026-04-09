@@ -45,6 +45,29 @@ def fetch_clean_news_text_for_embedding(symbol: str) -> pd.DataFrame:
         return pd.read_sql_query(q, conn, params={"symbol": symbol.upper()})
 
 
+def fetch_clean_news_for_asof(symbols: list[str], ts_min, ts_max) -> pd.DataFrame:
+    """Fetch raw clean-news rows suitable for timestamp as-of joins."""
+    if not symbols or ts_min is None or ts_max is None:
+        return pd.DataFrame()
+    q = text(
+        """
+        SELECT symbol, published_at, finbert_scalar
+        FROM clean_news_articles
+        WHERE symbol = ANY(:symbols)
+          AND published_at <= :ts_max
+          AND published_at >= :ts_min - INTERVAL '90 days'
+        ORDER BY symbol, published_at
+        """
+    )
+    params = {
+        "symbols": [s.upper() for s in symbols],
+        "ts_min": ts_min,
+        "ts_max": ts_max,
+    }
+    with engine.connect() as conn:
+        return pd.read_sql_query(q, conn, params=params)
+
+
 def upsert_raw_news(
     source: str,
     external_id: str,

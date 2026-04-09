@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free sentiment-rollup embed-news-qdrant
+.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup embed-news-qdrant
 
 up:
 	cd infra && docker compose up -d
@@ -50,6 +50,71 @@ news-ingest:
 
 news-backfill-free:
 	@echo 'Usage: make news-backfill-free FROM=2015-01-01 TO=2026-03-27 SYM=AAPL PROVIDER=hybrid' && export PYTHONPATH=src && python src/data_pipeline/news/ingest.py --provider $${PROVIDER:-hybrid} --score-finbert --from-date $${FROM:-2015-01-01} --to-date $${TO:-$$(date +%F)} --symbols $${SYM:-AAPL}
+
+news-backfill-free-finbert:
+	@echo 'Usage: make news-backfill-free-finbert FROM=2015-01-01 TO=2026-03-27 PROVIDER=hybrid'
+	@export PYTHONPATH=src && python src/data_pipeline/news/ingest.py \
+		--provider $${PROVIDER:-gdelt} \
+		--score-finbert \
+		--from-date $${FROM:-2015-01-01} \
+		--to-date $${TO:-$$(date +%F)} \
+		--heartbeat-seconds $${HEARTBEAT:-10} \
+		--max-concurrency $${CONCURRENCY:-1} \
+		--request-timeout $${TIMEOUT:-30} \
+		--retry-max $${RETRY_MAX:-6}
+
+news-backfill-kaggle:
+	@echo 'Usage: make news-backfill-kaggle KAGGLE_PATH=data/news/historical.csv [KAGGLE_KEY=generic_financial_news] [SYM=AAPL] [FROM=2015-01-01] [TO=2026-03-27]'
+	@export PYTHONPATH=src && python src/data_pipeline/news/ingest.py \
+		--provider kaggle \
+		--kaggle-dataset-path $${KAGGLE_PATH} \
+		--kaggle-dataset-key $${KAGGLE_KEY:-generic_financial_news} \
+		--from-date $${FROM:-2015-01-01} \
+		--to-date $${TO:-$$(date +%F)} \
+		--symbols $${SYM:-SPY}
+
+news-backfill-kaggle-finbert:
+	@echo 'Usage: make news-backfill-kaggle-finbert KAGGLE_PATH=data/news/sp500.csv [KAGGLE_KEY=sp500_headlines_2008_2024] [FROM=2008-01-01] [TO=2024-12-31]'
+	@export PYTHONPATH=src && python src/data_pipeline/news/ingest.py \
+		--provider kaggle \
+		--kaggle-dataset-path $${KAGGLE_PATH:-data/news/sp500.csv} \
+		--kaggle-dataset-key $${KAGGLE_KEY:-sp500_headlines_2008_2024} \
+		--score-finbert \
+		--from-date $${FROM:-2008-01-01} \
+		--to-date $${TO:-2024-12-31} \
+		--heartbeat-seconds $${HEARTBEAT:-10} \
+		--max-concurrency $${CONCURRENCY:-1} \
+		--request-timeout $${TIMEOUT:-30} \
+		--retry-max $${RETRY_MAX:-4} \
+		--symbols $${SYM:-AAPL}
+
+news-backfill-kaggle-dual:
+	@echo 'Usage: make news-backfill-kaggle-dual KAGGLE_SP500_PATH=data/news/sp500.csv KAGGLE_YOGESH_PATH=data/news/yogesh.csv [SYM=AAPL]'
+	@export PYTHONPATH=src && python src/data_pipeline/news/ingest.py \
+		--provider kaggle \
+		--kaggle-dataset-key sp500_headlines_2008_2024 \
+		--kaggle-dataset-path $${KAGGLE_SP500_PATH} \
+		--kaggle-dataset-key yogeshchary_financial_news \
+		--kaggle-dataset-path $${KAGGLE_YOGESH_PATH} \
+		--from-date $${FROM:-2008-01-01} \
+		--to-date $${TO:-$$(date +%F)} \
+		--symbols $${SYM:-AAPL}
+
+news-backfill-kaggle-dual-finbert:
+	@echo 'Usage: make news-backfill-kaggle-dual-finbert KAGGLE_SP500_PATH=data/news/sp500.csv KAGGLE_YOGESH_PATH=data/news/yogesh.csv'
+	@export PYTHONPATH=src && python src/data_pipeline/news/ingest.py \
+		--provider kaggle \
+		--kaggle-dataset-key sp500_headlines_2008_2024 \
+		--kaggle-dataset-path $${KAGGLE_SP500_PATH:-data/news/sp500.csv} \
+		--kaggle-dataset-key yogeshchary_financial_news \
+		--kaggle-dataset-path $${KAGGLE_YOGESH_PATH:-data/news/yogesh.csv} \
+		--score-finbert \
+		--from-date $${FROM:-2008-01-01} \
+		--to-date $${TO:-$$(date +%F)} \
+		--heartbeat-seconds $${HEARTBEAT:-10} \
+		--max-concurrency $${CONCURRENCY:-1} \
+		--request-timeout $${TIMEOUT:-30} \
+		--retry-max $${RETRY_MAX:-4}
 
 sentiment-rollup:
 	export PYTHONPATH=src && python src/ml/sentiment/rollup_daily.py

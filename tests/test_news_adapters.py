@@ -1,7 +1,10 @@
+import asyncio
 from datetime import UTC, date
 
-from data_pipeline.news.gdelt_adapter import iter_gdelt_news
-from data_pipeline.news.sec_adapter import iter_sec_news
+import httpx
+
+from data_pipeline.news.gdelt_adapter import fetch_gdelt_news_async, iter_gdelt_news
+from data_pipeline.news.sec_adapter import fetch_sec_news_async, iter_sec_news
 
 
 class _Resp:
@@ -68,3 +71,81 @@ def test_sec_adapter_yields_recent_forms(monkeypatch):
     assert len(out) == 1
     assert out[0].external_id.startswith("sec:")
     assert out[0].published_at.tzinfo == UTC
+
+
+def test_async_gdelt_fetch_contract(monkeypatch):
+    async def _fake_fetch(*args, **kwargs):
+        return (
+            [
+                {
+                    "title": "AAPL revenue growth",
+                    "seendate": "2015-01-02T12:00:00Z",
+                    "url": "https://example.com/aapl",
+                }
+            ],
+            2,
+        )
+
+    monkeypatch.setattr("data_pipeline.news.gdelt_adapter._fetch_day_async", _fake_fetch)
+
+    async def _run():
+        async with httpx.AsyncClient() as client:
+            items, m = await fetch_gdelt_news_async(
+                "AAPL",
+                date(2015, 1, 2),
+                date(2015, 1, 2),
+                client=client,
+                sem=asyncio.Semaphore(1),
+                request_timeout=5.0,
+                retry_max=1,
+                provider_sleep_s=0.0,
+            )
+        return items, m
+
+    items, m = asyncio.run(_run())
+    assert len(items) == 1
+    assert m["retries"] == 2
+    assert m["kept"] == 1
+
+
+def test_async_sec_fetch_contract(monkeypatch):
+    async def _fake_ticker(*args, **kwargs):
+        return "0000320193", 1
+
+    async def _fake_json(url, **kwargs):
+        return (
+            {
+                "filings": {
+                    "recent": {
+                        "form": ["8-K"],
+                        "filingDate": ["2015-01-02"],
+                        "accessionNumber": ["0000320193-15-000001"],
+                        "primaryDocument": ["a8k.htm"],
+                        "isInlineXBRL": [1],
+                    }
+                }
+            },
+            2,
+        )
+
+    monkeypatch.setattr("data_pipeline.news.sec_adapter._ticker_to_cik_async", _fake_ticker)
+    monkeypatch.setattr("data_pipeline.news.sec_adapter._fetch_json_async", _fake_json)
+
+    async def _run():
+        async with httpx.AsyncClient() as client:
+            items, m = await fetch_sec_news_async(
+                "AAPL",
+                date(2015, 1, 1),
+                date(2015, 1, 5),
+                client=client,
+                sem=asyncio.Semaphore(1),
+                request_timeout=5.0,
+                retry_max=1,
+                provider_sleep_s=0.0,
+            )
+        return items, m
+
+    items, m = asyncio.run(_run())
+    assert len(items) == 1
+    assert items[0].symbol == "AAPL"
+    assert m["retries"] == 3

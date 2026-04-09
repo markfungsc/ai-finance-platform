@@ -4,6 +4,7 @@ cffi==2.0.0
 charset-normalizer==3.4.5
 curl_cffi==0.13.0
 fastapi==0.115.8
+httpx==0.28.1
 frozendict==2.4.7
 greenlet==3.3.2
 idna==3.11
