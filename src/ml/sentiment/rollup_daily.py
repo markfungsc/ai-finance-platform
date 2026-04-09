@@ -49,11 +49,12 @@ def load_clean_news() -> pd.DataFrame:
     df = fetch_clean_news_for_rollup()
     if df.empty:
         return df
-    df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
-    df["finbert_scalar"] = pd.to_numeric(df["finbert_scalar"], errors="coerce").fillna(
-        0.0
-    )
-    df["as_of_date"] = df["published_at"].dt.normalize().dt.date
+    # Own a mutable frame (read_sql / mocks may return a view; CoW-safe for pandas 3).
+    df = df.copy()
+    df.loc[:, "published_at"] = pd.to_datetime(df["published_at"], utc=True)
+    fin = pd.to_numeric(df["finbert_scalar"], errors="coerce").fillna(0.0)
+    df.loc[:, "finbert_scalar"] = fin.to_numpy(dtype=float, copy=False)
+    df.loc[:, "as_of_date"] = df["published_at"].dt.normalize().dt.date
     return df.sort_values(["symbol", "published_at"]).reset_index(drop=True)
 
 

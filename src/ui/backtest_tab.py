@@ -15,6 +15,20 @@ import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from ml.analysis.explanations import indicator_context_tags, threshold_explanation
+
+
+def _prob_from_backtest_row(row: pd.Series) -> float | None:
+    """Artifact CSV uses ``prob_trade_success``; API/UI may use ``probability_trade_success``."""
+    for col in ("prob_trade_success", "probability_trade_success"):
+        if col not in row.index:
+            continue
+        x = pd.to_numeric(row[col], errors="coerce")
+        if pd.isna(x):
+            continue
+        return float(x)
+    return None
+
 
 def _row_entry_price(row: pd.Series, *, has_entry_price: bool) -> float | None:
     """Prefer engine ``entry_price``; fall back to bar ``close`` when missing."""
@@ -155,6 +169,45 @@ def fetch_trades_api(
     if not data:
         return pd.DataFrame()
     return pd.DataFrame(data)
+
+
+def _enrich_work_with_chart_indicators(
+    work: pd.DataFrame,
+    artifacts_root: Path,
+    split_id: int,
+) -> pd.DataFrame:
+    """
+    Left-join OHLC/TA from ``/backtest/indicators`` (same source as Price & TA tab).
+
+    ``backtest.csv`` rows are mostly model features; ``indicator_context_tags`` needs
+    raw ``ema_10``, ``macd``, ``rsi_14``, etc., from the DB via the API.
+    """
+    if work.empty or "timestamp" not in work.columns or "symbol" not in work.columns:
+        return work
+    parts: list[pd.DataFrame] = []
+    for sym in sorted(work["symbol"].dropna().astype(str).unique()):
+        sub = work.loc[work["symbol"].astype(str) == sym].copy()
+        try:
+            ind = fetch_indicators_api(artifacts_root, split_id, sym)
+        except Exception:
+            parts.append(sub)
+            continue
+        if ind.empty:
+            parts.append(sub)
+            continue
+        ind = ind.copy()
+        ind["timestamp"] = pd.to_datetime(ind["timestamp"], utc=True, errors="coerce")
+        ind["symbol"] = ind["symbol"].astype(str)
+        sub["timestamp"] = pd.to_datetime(sub["timestamp"], utc=True, errors="coerce")
+        sub["symbol"] = sub["symbol"].astype(str)
+        overlap = (set(sub.columns) & set(ind.columns)) - {"timestamp", "symbol"}
+        sub_trim = sub.drop(columns=list(overlap), errors="ignore")
+        merged = sub_trim.merge(ind, on=["timestamp", "symbol"], how="left")
+        parts.append(merged)
+    if not parts:
+        return work
+    out = pd.concat(parts, ignore_index=True)
+    return out.sort_values(["timestamp", "symbol"], kind="mergesort")
 
 
 def dedupe_pooled_timestamp_for_plot(df: pd.DataFrame) -> pd.DataFrame:
@@ -939,7 +992,7 @@ def render(artifacts_root_str: str) -> None:
                 rows.append({"split": n, "error": str(e)})
 
         summ = pd.DataFrame(rows)
-        st.dataframe(summ, use_container_width=True)
+        st.dataframe(summ, width="stretch")
         plot_df = summ[summ["cum_strategy_end"].notna()].copy()
         if not plot_df.empty and "cum_strategy_end" in plot_df.columns:
             grid_bundle = load_threshold_grid_json(artifacts_root)
@@ -991,7 +1044,7 @@ def render(artifacts_root_str: str) -> None:
                     strategy_name=f"Strategy (τ={thr_f:.3g})",
                     market_name="Market (per split)",
                 )
-            st.plotly_chart(fig_sum, use_container_width=True)
+            st.plotly_chart(fig_sum, width="stretch")
             if grid_rows and strategy_source != 0:
                 st.caption(
                     "Strategy/market points come from `threshold_grid.json` (replay). "
@@ -1083,7 +1136,7 @@ def render(artifacts_root_str: str) -> None:
             hovermode="x unified",
             legend=dict(orientation="h", y=1.1),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         if pooled and "symbol" in df.columns:
             symbols_eq = sorted(df["symbol"].dropna().astype(str).unique())
@@ -1095,7 +1148,7 @@ def render(artifacts_root_str: str) -> None:
                 )
                 fig_sym = plotly_equity_per_symbol_vs_market(df, sym_eq)
                 if fig_sym is not None:
-                    st.plotly_chart(fig_sym, use_container_width=True)
+                    st.plotly_chart(fig_sym, width="stretch")
 
     with sub_px:
         symbols: list[str] = []
@@ -1131,7 +1184,7 @@ def render(artifacts_root_str: str) -> None:
                     fig_p = plotly_split_panels(
                         df_plot_ind, str(sym_pick), trades=trades_df
                     )
-                    st.plotly_chart(fig_p, use_container_width=True)
+                    st.plotly_chart(fig_p, width="stretch")
         except Exception as e:
             st.exception(e)
 
@@ -1155,7 +1208,7 @@ def render(artifacts_root_str: str) -> None:
                 tbl_view = tbl
 
             st.subheader("Per-trade PnL (entry/exit, compounded equity)")
-            st.dataframe(tbl_view, use_container_width=True, height=340)
+            st.dataframe(tbl_view, width="stretch", height=340)
 
             fig_te = None
             if sym_filter == "All":
@@ -1164,7 +1217,114 @@ def render(artifacts_root_str: str) -> None:
                 df_sym = df[df.get("symbol", "").astype(str) == sym_filter]
                 fig_te = plotly_trade_equity_by_symbol(df_sym)
             if fig_te is not None:
-                st.plotly_chart(fig_te, use_container_width=True)
+                st.plotly_chart(fig_te, width="stretch")
+
+            if sym_filter != "All" and "symbol" in df.columns:
+                work_df = df[df["symbol"].astype(str) == sym_filter].copy()
+            else:
+                work_df = df.copy()
+
+            with st.expander("Signal/Omission explainability (model + context)"):
+                if (
+                    sym_filter == "All"
+                    and "symbol" in df.columns
+                    and df["symbol"].dropna().astype(str).nunique() > 1
+                ):
+                    st.caption(
+                        "Full bar history for this split, chronological across **all** "
+                        'symbols. Narrow with "Trades — symbol" and the row filter below.'
+                    )
+                row_kind = st.selectbox(
+                    "Rows to explain",
+                    ["All bars", "Omissions only", "Signal days only"],
+                    key="explain_row_filter",
+                )
+                work = work_df.sort_values("timestamp").copy()
+                if "signal" in work.columns:
+                    is_signal = (
+                        pd.to_numeric(work["signal"], errors="coerce").fillna(0) == 1
+                    )
+                else:
+                    is_signal = pd.Series(False, index=work.index)
+                if row_kind == "Omissions only":
+                    work = work.loc[~is_signal]
+                elif row_kind == "Signal days only":
+                    work = work.loc[is_signal]
+
+                work = _enrich_work_with_chart_indicators(work, artifacts_root, snum)
+
+                grid_bundle = load_threshold_grid_json(artifacts_root)
+                thr = (
+                    float(grid_bundle["best_threshold"])
+                    if grid_bundle and grid_bundle.get("best_threshold") is not None
+                    else None
+                )
+
+                reason_rows: list[dict] = []
+                for _, r in work.iterrows():
+                    if "signal" in r.index and pd.notna(r["signal"]):
+                        try:
+                            sig = 1 if int(float(r["signal"])) == 1 else 0
+                        except (TypeError, ValueError):
+                            sig = 0
+                    else:
+                        sig = 0
+                    tags = indicator_context_tags(r)
+                    indicator_explanation = (
+                        ", ".join(tags) if tags else "No indicator context available."
+                    )
+                    prob = _prob_from_backtest_row(r)
+                    if prob is not None and thr is not None:
+                        reason = threshold_explanation(prob, thr)
+                    else:
+                        reason = (
+                            "No model score in artifact; see indicator explanation."
+                        )
+                    reason_rows.append(
+                        {
+                            "timestamp": r.get("timestamp"),
+                            "symbol": r.get("symbol"),
+                            "signal": sig,
+                            "reason": reason,
+                            "indicator_explanation": indicator_explanation,
+                        }
+                    )
+                if reason_rows:
+                    er = pd.DataFrame(reason_rows)
+                    _explain_cols = [
+                        "timestamp",
+                        "symbol",
+                        "signal",
+                        "reason",
+                        "indicator_explanation",
+                    ]
+                    er = er[[c for c in _explain_cols if c in er.columns]]
+                    n_sig = (
+                        int((er["signal"] == 1).sum()) if "signal" in er.columns else 0
+                    )
+                    n_omit = len(er) - n_sig
+                    st.caption(
+                        f"Showing {len(er)} rows ({n_sig} signal bars, {n_omit} non-signal)."
+                    )
+                    if len(er) > 50_000:
+                        st.warning(
+                            "Very large table; consider filtering by symbol or row kind."
+                        )
+                    st.dataframe(er, width="stretch", height=400)
+                    er_omit = er[er["signal"] != 1] if "signal" in er.columns else er
+                    if not er_omit.empty and "reason" in er_omit.columns:
+                        top = (
+                            er_omit["reason"]
+                            .value_counts()
+                            .rename_axis("reason")
+                            .reset_index(name="count")
+                        )
+                        st.markdown("**Most common reasons (non-signal bars only)**")
+                        st.dataframe(top, width="stretch", height=180)
+                else:
+                    st.info(
+                        "No rows match the current symbol and row filter selection."
+                    )
 
     with st.expander("Preview backtest.csv"):
-        st.dataframe(df.head(50), use_container_width=True)
+        st.dataframe(df.head(50), width="stretch")

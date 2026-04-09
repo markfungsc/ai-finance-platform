@@ -86,7 +86,7 @@ def main() -> None:
 
         if run and symbol:
             try:
-                data = _post("/predict_symbol", {"symbol": symbol})
+                data = _post("/predict_symbol_explain", {"symbol": symbol})
                 p = float(data["probability_trade_success"])
                 t = float(data["threshold_used"])
                 trade = bool(data["should_trade"])
@@ -98,6 +98,16 @@ def main() -> None:
                     st.success("Probability is above the deployed threshold.")
                 else:
                     st.warning("Probability is at or below the deployed threshold.")
+                st.caption(data.get("reason", ""))
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Top Feature Magnitudes (latest row)**")
+                    tfm = pd.DataFrame(data.get("top_feature_magnitudes") or [])
+                    st.dataframe(tfm, width="stretch", height=260)
+                with c2:
+                    st.markdown("**Global Feature Importance (model)**")
+                    gfi = pd.DataFrame(data.get("global_feature_importance") or [])
+                    st.dataframe(gfi, width="stretch", height=260)
             except requests.HTTPError as e:
                 st.error(str(e))
             except Exception as e:
@@ -151,7 +161,7 @@ def main() -> None:
                     if not plot_df.empty:
                         st.line_chart(plot_df, height=220)
                     with st.expander("Raw grid rows"):
-                        st.dataframe(df, use_container_width=True)
+                        st.dataframe(df, width="stretch")
             except Exception as e:
                 st.exception(e)
 

@@ -65,8 +65,8 @@ def test_iter_kaggle_news_multi_dedupes_cross_source(tmp_path):
     sp.write_text(
         "\n".join(
             [
-                "stock,date,headline,url",
-                "AAPL,2020-01-02T10:30:00Z,Apple launches new product,https://same/item",
+                "Title,Date",
+                "Apple launches new product,2020-01-02T10:30:00Z",
             ]
         ),
         encoding="utf-8",
@@ -75,7 +75,8 @@ def test_iter_kaggle_news_multi_dedupes_cross_source(tmp_path):
         "\n".join(
             [
                 "ticker,published_at,headline,summary,text,url",
-                "AAPL,2020-01-02T10:30:40Z,Apple launches new product,,details,https://same/item",
+                # Same headline/minute as S&P row; empty URL so dedupe key matches market row.
+                "AAPL,2020-01-02T10:30:40Z,Apple launches new product,,details,",
             ]
         ),
         encoding="utf-8",

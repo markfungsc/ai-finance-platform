@@ -28,13 +28,17 @@ SENTIMENT_DAILY_DUAL_COLS = [
     "spy_news_volume_d1",
     "spy_sentiment_vol_d1",
 ]
-SENTIMENT_ALL_COLS = [SENTIMENT_Z_COL, *SENTIMENT_EXTRA_COLS, *SENTIMENT_DAILY_DUAL_COLS]
+SENTIMENT_ALL_COLS = [
+    SENTIMENT_Z_COL,
+    *SENTIMENT_EXTRA_COLS,
+    *SENTIMENT_DAILY_DUAL_COLS,
+]
 
 
 def _neutralize(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+    out = df.copy(deep=True)
     for col in SENTIMENT_ALL_COLS:
-        out[col] = 0.0
+        out.loc[:, col] = 0.0
     return out
 
 
@@ -45,23 +49,22 @@ def _calc_asof_from_articles(
     Build leakage-safe sentiment features using only rows where published_at <= bar timestamp.
     Uses trailing windows per symbol at each bar timestamp.
     """
-    out = df_in.copy()
-    out["_bar_ts"] = pd.to_datetime(out["timestamp"], utc=True)
-    out["symbol"] = out["symbol"].astype(str)
+    out = df_in.copy(deep=True)
+    out.loc[:, "_bar_ts"] = pd.to_datetime(out["timestamp"], utc=True)
+    out.loc[:, "symbol"] = out["symbol"].astype(str)
 
     if articles.empty:
         return _neutralize(out.drop(columns=["_bar_ts"]))
 
-    art = articles.copy()
-    art["symbol"] = art["symbol"].astype(str)
-    art["published_at"] = pd.to_datetime(art["published_at"], utc=True)
-    art["finbert_scalar"] = pd.to_numeric(
-        art["finbert_scalar"], errors="coerce"
-    ).fillna(0.0)
+    art = articles.copy(deep=True)
+    art.loc[:, "symbol"] = art["symbol"].astype(str)
+    art.loc[:, "published_at"] = pd.to_datetime(art["published_at"], utc=True)
+    fin_a = pd.to_numeric(art["finbert_scalar"], errors="coerce").fillna(0.0)
+    art.loc[:, "finbert_scalar"] = fin_a.to_numpy(dtype=float, copy=False)
     art = art.sort_values(["symbol", "published_at"]).reset_index(drop=True)
 
     for col in SENTIMENT_ALL_COLS:
-        out[col] = 0.0
+        out.loc[:, col] = 0.0
 
     for sym in out["symbol"].dropna().unique():
         mask = out["symbol"] == sym
@@ -73,7 +76,9 @@ def _calc_asof_from_articles(
         p = a_sym["published_at"]
         s = a_sym["finbert_scalar"]
 
-        def _daily_stats(ts: pd.Timestamp, a: pd.DataFrame) -> tuple[float, float, float]:
+        def _daily_stats(
+            ts: pd.Timestamp, a: pd.DataFrame
+        ) -> tuple[float, float, float]:
             if a.empty:
                 return 0.0, 0.0, 0.0
             ap = a["published_at"]
@@ -122,11 +127,16 @@ def _calc_asof_from_articles(
             index=bars.index,
         )
         # Keep existing z-score style baseline column for compatibility.
-        vdf[SENTIMENT_Z_COL] = vdf["sentiment_24h"]
+        vdf.loc[:, SENTIMENT_Z_COL] = vdf["sentiment_24h"].to_numpy(
+            dtype=float, copy=False
+        )
         for col in SENTIMENT_ALL_COLS:
-            out.loc[vdf.index, col] = pd.to_numeric(vdf[col], errors="coerce").fillna(
-                0.0
+            num = (
+                pd.to_numeric(vdf[col], errors="coerce")
+                .fillna(0.0)
+                .to_numpy(dtype=float, copy=False)
             )
+            out.loc[vdf.index, col] = num
 
     return out.drop(columns=["_bar_ts"])
 
@@ -154,16 +164,11 @@ def _merge_sentiment_frame(
         day_col,
         *[c for c in SENTIMENT_ALL_COLS if c in src.columns],
     ]
-    raw = (
-        src[keep_cols]
-        .copy()
-        .assign(
-            symbol=lambda d: d["symbol"].astype(str),
-            _sent_merge_day=lambda d: pd.to_datetime(
-                d[day_col], utc=True
-            ).dt.normalize(),
-        )
-    )
+    raw = src[keep_cols].copy(deep=True)
+    raw.loc[:, "symbol"] = raw["symbol"].astype(str)
+    raw.loc[:, "_sent_merge_day"] = pd.to_datetime(
+        raw[day_col], utc=True
+    ).dt.normalize()
     sub = raw.drop_duplicates(subset=["symbol", "_sent_merge_day"], keep="last")
 
     merged = out.merge(
@@ -171,13 +176,17 @@ def _merge_sentiment_frame(
         on=["symbol", "_sent_merge_day"],
         how="left",
     )
-    updates = {}
+    merged = merged.copy(deep=True)
     for col in SENTIMENT_ALL_COLS:
         base = (
             merged[col] if col in merged.columns else pd.Series(0.0, index=merged.index)
         )
-        updates[col] = pd.to_numeric(base, errors="coerce").fillna(0.0)
-    merged = merged.assign(**updates)
+        num = (
+            pd.to_numeric(base, errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=float, copy=False)
+        )
+        merged.loc[:, col] = num
     return merged.drop(columns=["_sent_merge_day"])
 
 
@@ -202,7 +211,8 @@ def attach_sentiment_features(
         return _neutralize(df)
 
     merge_day = pd.to_datetime(df["timestamp"], utc=True).dt.normalize()
-    out = df.assign(_sent_merge_day=merge_day)
+    out = df.copy(deep=True)
+    out.loc[:, "_sent_merge_day"] = merge_day.to_numpy(copy=False)
 
     # Leakage-safe path: if DB is available, compute as-of features from raw clean news.
     if os.getenv("DATABASE_URL"):

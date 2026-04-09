@@ -25,7 +25,7 @@ What works end-to-end today (local, Postgres-backed):
 - **Training:** `make train` runs [`src/scripts/run_train.py`](src/scripts/run_train.py) (scikit-learn RandomForest, joblib artifact under `models/`).
 - **Evaluation & backtest:** metrics via [`src/ml/evaluate.py`](src/ml/evaluate.py); `make backtest` and `make walk-forward` exercise [`src/ml/backtest/`](src/ml/backtest/).
 - **Inference (CLI):** `make predict` runs [`src/ml/inference/predict.py`](src/ml/inference/predict.py) (optional merge debug output for inspection).
-- **Optional news sentiment:** [`src/ml/sentiment/`](src/ml/sentiment/) — FinBERT scores on yfinance headlines, rolled to `news_sentiment_mean_z` and joined in training/predict when a Parquet cache exists; missing cache → neutral `0.0`. See **News sentiment (optional)** below.
+- **Optional news sentiment:** [`src/ml/sentiment/`](src/ml/sentiment/) — FinBERT scores from durable news sources and leakage-safe as-of attach. Current training/inference sentiment block uses daily symbol + market features (`sym_*_d1`, `spy_*_d1`) with neutral fallback.
 
 - **Tests & lint:** `make test` (pytest), `make lint` / `make fmt` (Ruff).
 
@@ -37,7 +37,7 @@ Not here yet: HTTP inference API, containerized app service, experiment tracking
 
 1. Install NLP stack (PyTorch + Transformers): `pip install -r requirements-nlp.txt` (base `requirements.txt` includes `pyarrow` for reading/writing the cache).
 2. Build cache (from repo root, `PYTHONPATH=src`): `python -m ml.sentiment --symbols AAPL MSFT` (defaults to `TRAIN_SYMBOLS`; add `--max-bars N`, `--no-score` for structure-only rows, `--output PATH`).
-3. Default cache path: `data/sentiment/daily_sentiment.parquet`. Training (`load_train_dataset` / `load_dataset`) and CLI predict attach `news_sentiment_mean_z` after market context; **retrain** saved models so `FEATURE_COLUMNS` joblibs match the widened feature matrix.
+3. Default cache path: `data/sentiment/daily_sentiment.parquet`. Training (`load_train_dataset` / `load_dataset`) and CLI/API predict attach sentiment after market context; current primary features are daily symbol + SPY streams (`sym_sentiment_d1`, `sym_news_volume_d1`, `sym_sentiment_vol_d1`, `spy_sentiment_d1`, `spy_news_volume_d1`, `spy_sentiment_vol_d1`). **Retrain** saved models whenever feature columns change.
 
 **Postgres + Qdrant path (preferred for durable news):** Run `make migrate` (includes [`008_news_sentiment.sql`](infra/migrations/008_news_sentiment.sql) and [`009_daily_sentiment_horizons.sql`](infra/migrations/009_daily_sentiment_horizons.sql)). Start Qdrant with `docker compose` (`finance_qdrant` on port 6333). Ingest headlines: `make news-ingest` (yfinance latest), single-file historical Kaggle backfill (`make news-backfill-kaggle KAGGLE_PATH=data/news/historical.csv SYM=AAPL`), or dual-source Kaggle union (`make news-backfill-kaggle-dual KAGGLE_SP500_PATH=data/news/sp500.csv KAGGLE_YOGESH_PATH=data/news/yogesh.csv SYM=AAPL`). Realtime/latest path remains yfinance. Free-source backfill remains available: `make news-backfill-free FROM=2015-01-01 TO=2026-03-27 SYM=AAPL PROVIDER=hybrid` (`PROVIDER`: `gdelt`, `sec`, `hybrid`). Recompute gold features (`rollup_daily`: per-symbol rolling z for horizons/volume/volatility; see `src/ml/sentiment/rollup_daily.py`): `make sentiment-rollup`. Optional embeddings: `pip install -r requirements-nlp.txt` then `make embed-news-qdrant SYM=AAPL`. `attach_sentiment_features` reads **`daily_symbol_sentiment` in Postgres first** (when `DATABASE_URL` is set), then falls back to the Parquet cache. For no-coverage periods (e.g., pre-2015), rollup writes neutral sentiment values for full feature timelines.
 
@@ -47,7 +47,21 @@ Kaggle schemas supported by the adapter:
 - `generic_financial_news`: expects columns `symbol`, `published_at`, `title`, `summary`, `body`, `url`
 - `headline_time_ticker`: expects columns `ticker`, `date`, `headline`, `summary`, `article`, `link`
 
-Dual-source ingest deduplicates deterministically across datasets by `(symbol, minute timestamp bucket, title/url fingerprint, content hash)`, and stores provenance in raw payload (`dataset_key`, source URL, local path, local file hash).
+Dual-source ingest deduplicates deterministically across datasets by `(symbol, minute timestamp bucket, title/url fingerprint)`, and stores provenance in raw payload (`dataset_key`, source URL, local path, local file hash).
+
+### Explainability in Streamlit (current)
+
+- Prediction tab: score/threshold reason text, top feature magnitudes for latest row, and global model feature importance.
+- Backtest tab: omission explainability table with reason codes plus indicator/volume/sentiment context tags.
+- These are fast built-in explanations (no heavy SHAP dependency) intended for operational debugging and strategy iteration.
+
+### Recommended next step
+
+If sentiment impact appears weak, run an ablation comparison before adding new data sources:
+- baseline model (no sentiment),
+- symbol-only sentiment,
+- symbol + SPY daily sentiment,
+- compare precision/recall, expectancy, and drawdown stability per split.
 
 ## Strategic roadmap
 

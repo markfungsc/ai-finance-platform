@@ -17,6 +17,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
 from database.queries import fetch_features_window
 from log_config import get_logger
+from ml.analysis.explanations import (
+    global_feature_importance,
+    threshold_explanation,
+    top_feature_magnitudes,
+)
+from ml.dataset import load_dataset
 from ml.inference.api_inference import predict_trade_success_probability
 from ml.models.save_loads import load_feature_columns, load_model, load_scaler
 from ui.backtest_tab import load_backtest_csv
@@ -65,6 +71,16 @@ class PredictSymbolResponse(BaseModel):
     probability_trade_success: float
     threshold_used: float
     should_trade: bool
+
+
+class PredictSymbolExplainResponse(BaseModel):
+    symbol: str
+    probability_trade_success: float
+    threshold_used: float
+    should_trade: bool
+    reason: str
+    top_feature_magnitudes: list[dict]
+    global_feature_importance: list[dict]
 
 
 class ThresholdGridResponse(BaseModel):
@@ -276,6 +292,52 @@ def predict_symbol(body: PredictSymbolRequest):
         probability_trade_success=p,
         threshold_used=threshold_used,
         should_trade=bool(should_trade),
+    )
+
+
+@app.post("/predict_symbol_explain", response_model=PredictSymbolExplainResponse)
+def predict_symbol_explain(body: PredictSymbolRequest):
+    symbol = body.symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=422, detail="symbol must be non-empty")
+    try:
+        X, _y, _df_merged = load_dataset(symbol, debug_merge=False, quiet=True)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"failed loading features: {e}") from e
+    if X.empty:
+        raise HTTPException(status_code=422, detail=f"No feature rows for symbol {symbol!r}")
+
+    feature_cols = app.state.feature_cols
+    row = X.iloc[[-1]].copy()
+    missing = [c for c in feature_cols if c not in row.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing feature columns for {symbol!r}: {missing[:20]}",
+        )
+    x_aligned = row[feature_cols]
+    if app.state.scaler is not None:
+        x_model = app.state.scaler.transform(x_aligned.to_numpy())
+    else:
+        x_model = x_aligned
+    if hasattr(app.state.model, "predict_proba"):
+        p = float(app.state.model.predict_proba(x_model)[0, 1])
+    else:
+        p = float(np.clip(app.state.model.predict(x_model)[0], 0.0, 1.0))
+    threshold_used = float(app.state.best_threshold)
+    should_trade = bool(p > threshold_used)
+    reason = threshold_explanation(p, threshold_used)
+
+    top_mag_df = top_feature_magnitudes(row.iloc[0], feature_cols, top_n=10)
+    global_imp_df = global_feature_importance(app.state.model, feature_cols, top_n=10)
+    return PredictSymbolExplainResponse(
+        symbol=symbol,
+        probability_trade_success=p,
+        threshold_used=threshold_used,
+        should_trade=should_trade,
+        reason=reason,
+        top_feature_magnitudes=top_mag_df.to_dict(orient="records"),
+        global_feature_importance=global_imp_df.to_dict(orient="records"),
     )
 
 

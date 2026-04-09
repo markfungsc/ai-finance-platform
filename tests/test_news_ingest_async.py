@@ -94,8 +94,8 @@ def test_fetch_items_async_kaggle_dual_path(tmp_path):
     sp.write_text(
         "\n".join(
             [
-                "stock,date,headline,url",
-                "AAPL,2020-01-02T10:30:00Z,Apple positive update,https://ex/a1",
+                "Title,Date",
+                "Apple positive update,2020-01-02T10:30:00Z",
             ]
         ),
         encoding="utf-8",
