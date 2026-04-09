@@ -220,7 +220,12 @@ async def fetch_sec_news_async(
                 text_for_score=title,
             )
         )
-    return out, {"fetched": fetched, "kept": len(out), "filtered": filtered, "retries": retries}
+    return out, {
+        "fetched": fetched,
+        "kept": len(out),
+        "filtered": filtered,
+        "retries": retries,
+    }
 
 
 def iter_sec_news(

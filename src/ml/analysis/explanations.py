@@ -80,9 +80,9 @@ def indicator_context_tags(row: pd.Series) -> list[str]:
             tags.append("RSI neutral")
 
     vol = pd.to_numeric(pd.Series([row.get("volume")]), errors="coerce").iloc[0]
-    vol_sma = pd.to_numeric(pd.Series([row.get("volume_sma_20")]), errors="coerce").iloc[
-        0
-    ]
+    vol_sma = pd.to_numeric(
+        pd.Series([row.get("volume_sma_20")]), errors="coerce"
+    ).iloc[0]
     if not pd.isna(vol) and not pd.isna(vol_sma) and vol_sma != 0:
         tags.append("Volume above 20D avg" if vol > vol_sma else "Volume below 20D avg")
 
@@ -94,10 +94,14 @@ def indicator_context_tags(row: pd.Series) -> list[str]:
     ).iloc[0]
     if not pd.isna(sym_sent):
         tags.append(
-            "Symbol sentiment positive" if sym_sent > 0 else "Symbol sentiment negative/flat"
+            "Symbol sentiment positive"
+            if sym_sent > 0
+            else "Symbol sentiment negative/flat"
         )
     if not pd.isna(spy_sent):
         tags.append(
-            "Market sentiment positive" if spy_sent > 0 else "Market sentiment negative/flat"
+            "Market sentiment positive"
+            if spy_sent > 0
+            else "Market sentiment negative/flat"
         )
     return tags

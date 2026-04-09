@@ -191,10 +191,20 @@ async def _fetch_items_async(
                 end_date=end_date,
             )
         )
-        return items, {"fetched": len(items), "kept": len(items), "filtered": 0, "retries": 0}
+        return items, {
+            "fetched": len(items),
+            "kept": len(items),
+            "filtered": 0,
+            "retries": 0,
+        }
     # yfinance path stays sync; run in thread.
     items = list(iter_yfinance_news(symbol))
-    return items, {"fetched": len(items), "kept": len(items), "filtered": 0, "retries": 0}
+    return items, {
+        "fetched": len(items),
+        "kept": len(items),
+        "filtered": 0,
+        "retries": 0,
+    }
 
 
 async def _heartbeat_loop(state: dict, every_s: int) -> None:

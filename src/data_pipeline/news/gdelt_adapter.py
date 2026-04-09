@@ -106,7 +106,9 @@ async def _fetch_day_async(
     for _ in range(retry_max + 1):
         async with sem:
             try:
-                r = await client.get(GDELT_DOC_API, params=params, timeout=request_timeout)
+                r = await client.get(
+                    GDELT_DOC_API, params=params, timeout=request_timeout
+                )
                 if r.status_code == 429:
                     await asyncio.sleep(5)
                     continue
@@ -200,14 +202,19 @@ async def fetch_gdelt_news_async(
                     text_for_score=text_for_score,
                 )
             )
-    return out, {"fetched": fetched, "kept": len(out), "filtered": filtered, "retries": retries}
+    return out, {
+        "fetched": fetched,
+        "kept": len(out),
+        "filtered": filtered,
+        "retries": retries,
+    }
 
 
 def iter_gdelt_news(
     symbol: str, start_date: date, end_date: date
 ) -> Iterator[NewsItemNormalized]:
     """Yield precision-filtered normalized rows for [start_date, end_date]."""
-    if end_date < start_date: 
+    if end_date < start_date:
         return
     cur = start_date
     seen: set[str] = set()

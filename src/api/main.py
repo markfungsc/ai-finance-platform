@@ -303,9 +303,13 @@ def predict_symbol_explain(body: PredictSymbolRequest):
     try:
         X, _y, _df_merged = load_dataset(symbol, debug_merge=False, quiet=True)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"failed loading features: {e}") from e
+        raise HTTPException(
+            status_code=422, detail=f"failed loading features: {e}"
+        ) from e
     if X.empty:
-        raise HTTPException(status_code=422, detail=f"No feature rows for symbol {symbol!r}")
+        raise HTTPException(
+            status_code=422, detail=f"No feature rows for symbol {symbol!r}"
+        )
 
     feature_cols = app.state.feature_cols
     row = X.iloc[[-1]].copy()
