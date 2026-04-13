@@ -138,9 +138,13 @@ class TestLoadDataset:
     @patch("ml.dataset.attach_market_context")
     @patch("ml.dataset.fetch_features_z")
     @patch("ml.dataset.fetch_features")
-    @patch("ml.dataset.TRAIN_SYMBOLS", ["AAPL", "MSFT"])
+    @patch(
+        "ml.dataset.get_pooled_dataset_symbols",
+        return_value=["AAPL", "MSFT"],
+    )
     def test_load_train_dataset_sorts_pooled_input_before_context_attach(
         self,
+        _mock_get_pooled: object,
         mock_fetch: object,
         mock_fetch_z: object,
         mock_attach_context: object,

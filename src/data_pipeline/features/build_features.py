@@ -1,7 +1,8 @@
+import os
+
 import pandas as pd
 import ta
 
-from constants import SUBSCRIPTIONS
 from database.queries import (
     STOCK_FEATURES_VALUE_COLUMNS,
     delete_incomplete_stock_feature_rows,
@@ -13,6 +14,7 @@ from database.queries import (
     upsert_features,
     upsert_features_z,
 )
+from universe.resolve import resolve_ingestion_symbols
 
 # Rows must be complete on these columns before upsert (matches stock_features INSERT).
 _STOCK_FEATURES_COLUMNS = ["symbol", "timestamp", *STOCK_FEATURES_VALUE_COLUMNS]
@@ -180,8 +182,10 @@ def run_feature_pipeline(symbol: str, backfill: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    # symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
-    # symbols = ["AAPL"]
-    symbols = SUBSCRIPTIONS
-    for sym in symbols:
-        run_feature_pipeline(sym, backfill=False)
+    backfill = os.environ.get("FEATURES_BACKFILL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    for sym in resolve_ingestion_symbols():
+        run_feature_pipeline(sym, backfill=backfill)

@@ -6,6 +6,7 @@ from ml.features import FEATURE_COLUMNS_MARKET_CONTEXT_Z
 
 def attach_market_context(df_z: pd.DataFrame) -> pd.DataFrame:
     spy = fetch_features_z("SPY").drop_duplicates(subset=["timestamp"])
+    qqq = fetch_features_z("QQQ").drop_duplicates(subset=["timestamp"])
     vix = fetch_features_z("^VIX").drop_duplicates(subset=["timestamp"])
     if "symbol" in df_z.columns:
         df_z = df_z.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
@@ -45,6 +46,39 @@ def attach_market_context(df_z: pd.DataFrame) -> pd.DataFrame:
     )
     spy_features_z = spy_features_z.sort_values("timestamp").reset_index(drop=True)
 
+    # --- QQQ FEATURES (same structure as SPY; not a tradable training target) ---
+    qqq_features_z = qqq[
+        [
+            "timestamp",
+            "return_1d_z",
+            "return_5d_z",
+            "volatility_20_z",
+            "sma_20_z",
+            "sma_50_z",
+            "ema_trend_bull_z",
+            "ema_slope_20_z",
+        ]
+    ].copy()
+
+    qqq_features_z = qqq_features_z.assign(
+        qqq_return_5d_z_minus_1d_z=(
+            qqq_features_z["return_5d_z"] - qqq_features_z["return_1d_z"]
+        ),
+    )
+
+    qqq_features_z = qqq_features_z.rename(
+        columns={
+            "return_1d_z": "qqq_return_1d_z",
+            "return_5d_z": "qqq_return_5d_z",
+            "volatility_20_z": "qqq_volatility_20_z",
+            "sma_20_z": "qqq_sma_20_z",
+            "sma_50_z": "qqq_sma_50_z",
+            "ema_trend_bull_z": "qqq_ema_trend_bull_z",
+            "ema_slope_20_z": "qqq_ema_slope_20_z",
+        }
+    )
+    qqq_features_z = qqq_features_z.sort_values("timestamp").reset_index(drop=True)
+
     # --- VIX FEATURES ---
     vix_features_z = vix[
         [
@@ -81,6 +115,7 @@ def attach_market_context(df_z: pd.DataFrame) -> pd.DataFrame:
 
     # --- MERGE ---
     df_z = df_z.merge(spy_features_z, on="timestamp", how="left")
+    df_z = df_z.merge(qqq_features_z, on="timestamp", how="left")
     # merge_asof requires both left/right keys to be sorted by the join key.
     df_z = pd.merge_asof(df_z, vix_features_z, on="timestamp", direction="backward")
 

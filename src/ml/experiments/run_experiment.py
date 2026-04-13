@@ -6,11 +6,11 @@ try:
 except ImportError:  # pragma: no cover - optional plotting dependency
     plt = None
 
-from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD, TRAIN_SYMBOLS
+from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
 from log_config import get_logger
 from ml.analysis.feature_importance import get_feature_importance
 from ml.backtest.runner import run_backtest
-from ml.dataset import load_train_dataset
+from ml.dataset import get_pooled_dataset_symbols, load_train_dataset
 from ml.experiments.artifacts import save_split_artifacts
 from ml.experiments.logger import log_experiment
 from ml.experiments.mlflow_logger import log_experiment_mlflow
@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 
 def run_experiment(model_name: str = "logistic_regression"):
+    pooled_symbols = get_pooled_dataset_symbols()
     X, y, df_merged = load_train_dataset()
     run_symbol = "pooled"
 
@@ -44,8 +45,8 @@ def run_experiment(model_name: str = "logistic_regression"):
     experiment = {
         "model": model_name,
         "symbol": run_symbol,
-        "n_symbols": len(TRAIN_SYMBOLS),
-        "symbols": ",".join(TRAIN_SYMBOLS),
+        "n_symbols": len(pooled_symbols),
+        "symbols": ",".join(pooled_symbols),
         "mae": summary["avg_mae"].round(4),
         "directional_accuracy": summary["avg_directional_accuracy"].round(4),
         "cum_strategy_return": summary["avg_strategy_cum_return"],

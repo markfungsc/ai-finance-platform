@@ -50,6 +50,22 @@ services:
       retries: 3
       start_period: 60s
 
+  ui:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.ui
+    container_name: finance_ui
+    ports:
+      - "8501:8501"
+    environment:
+      API_BASE_URL: http://api:8000
+      INFERENCE_API_BASE_URL: http://api:8000
+    volumes:
+      - ../experiments:/app/experiments:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
   qdrant:
     image: qdrant/qdrant:v1.12.4
     container_name: finance_qdrant

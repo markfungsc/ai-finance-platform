@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate ingestion clean features train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup embed-news-qdrant
+.PHONY: lint fmt up down logs migrate universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup embed-news-qdrant
 
 up:
 	cd infra && docker compose up -d
@@ -15,14 +15,44 @@ migrate:
 		cd infra && docker exec -i finance_postgres psql -U postgres -d ai_finance < $$f; \
 	done
 
+# Fetch current S&P 500 tickers from Wikipedia → data/universe/sp500_symbols.txt
+universe-fetch-sp500:
+	export PYTHONPATH=src && python -m universe
+
+# DB coverage vs resolved INGESTION_UNIVERSE (requires Postgres + migrate).
+# Default universe is subscriptions; override: ``make universe-preflight INGESTION_UNIVERSE=sp500``
+universe-preflight:
+	export PYTHONPATH=src && \
+	export INGESTION_UNIVERSE="$(or $(INGESTION_UNIVERSE),subscriptions)" && \
+	python -m universe.preflight
+
+# Same as preflight with INGESTION_UNIVERSE=sp500 (no need to pass on the command line)
+universe-preflight-sp500:
+	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && python -m universe.preflight
+
 ingestion:
 	export PYTHONPATH=src && python src/data_pipeline/ingestion/run_ingestion.py
+
+# Same as ingestion with INGESTION_UNIVERSE=sp500 (needs universe-fetch-sp500 first)
+ingestion-sp500:
+	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && python src/data_pipeline/ingestion/run_ingestion.py
 
 clean:
 	export PYTHONPATH=src && python src/data_pipeline/processing/clean_prices.py
 	
 features:
 	export PYTHONPATH=src && python src/data_pipeline/features/build_features.py
+
+features-sp500:
+	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && python src/data_pipeline/features/build_features.py
+
+# Full recompute features from clean history for all symbols in current universe
+features-backfill:
+	export PYTHONPATH=src && export FEATURES_BACKFILL=1 && python src/data_pipeline/features/build_features.py
+
+# First SP500 historical feature build: same as features-backfill with INGESTION_UNIVERSE=sp500
+features-sp500-backfill:
+	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && export FEATURES_BACKFILL=1 && python src/data_pipeline/features/build_features.py
 
 train:
 	export PYTHONPATH=src && python src/scripts/run_train.py

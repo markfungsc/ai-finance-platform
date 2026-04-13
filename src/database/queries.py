@@ -281,3 +281,46 @@ def get_features_zscore_count():
     """)
     with engine.connect() as conn:
         return conn.execute(query).scalar()
+
+
+def count_symbols_with_clean_rows(symbols: list[str]) -> int:
+    """How many distinct symbols in ``symbols`` have at least one ``clean_stock_prices`` row."""
+    if not symbols:
+        return 0
+    q = text(
+        """
+        SELECT COUNT(DISTINCT symbol) FROM clean_stock_prices
+        WHERE symbol = ANY(:symbols)
+        """
+    )
+    with engine.connect() as conn:
+        return int(conn.execute(q, {"symbols": symbols}).scalar() or 0)
+
+
+def count_symbols_with_stock_features(symbols: list[str]) -> int:
+    """How many distinct symbols in ``symbols`` have at least one ``stock_features`` row."""
+    if not symbols:
+        return 0
+    q = text(
+        """
+        SELECT COUNT(DISTINCT symbol) FROM stock_features
+        WHERE symbol = ANY(:symbols)
+        """
+    )
+    with engine.connect() as conn:
+        return int(conn.execute(q, {"symbols": symbols}).scalar() or 0)
+
+
+def list_symbols_missing_stock_features(expected: list[str]) -> list[str]:
+    """Symbols in ``expected`` that have no rows in ``stock_features`` (sorted)."""
+    if not expected:
+        return []
+    q = text(
+        """
+        SELECT DISTINCT symbol FROM stock_features
+        WHERE symbol = ANY(:symbols)
+        """
+    )
+    with engine.connect() as conn:
+        present = {row[0] for row in conn.execute(q, {"symbols": expected}).fetchall()}
+    return sorted(set(expected) - present)

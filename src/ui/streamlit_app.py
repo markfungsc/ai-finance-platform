@@ -17,6 +17,11 @@ import streamlit as st
 
 from ui.backtest_tab import default_artifacts_root
 from ui.backtest_tab import render as render_backtest
+from ui.predict_panel import (
+    dataframe_from_chart_history,
+    render_predict_price_ta_chart,
+    render_signal_omission_explainability,
+)
 
 
 def _api_base() -> str:
@@ -98,7 +103,25 @@ def main() -> None:
                     st.success("Probability is above the deployed threshold.")
                 else:
                     st.warning("Probability is at or below the deployed threshold.")
-                st.caption(data.get("reason", ""))
+
+                st.subheader("Price & TA (max historical data from API)")
+                df_px = dataframe_from_chart_history(data.get("chart_history") or [])
+                render_predict_price_ta_chart(
+                    df_px,
+                    symbol,
+                    data.get("latest_bar_timestamp"),
+                )
+
+                render_signal_omission_explainability(
+                    symbol=symbol,
+                    latest_bar_timestamp=data.get("latest_bar_timestamp"),
+                    probability=p,
+                    threshold=t,
+                    should_trade=trade,
+                    reason=str(data.get("reason", "")),
+                    indicator_tags=list(data.get("indicator_context_tags") or []),
+                )
+
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown("**Top Feature Magnitudes (latest row)**")

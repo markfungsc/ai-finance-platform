@@ -1,3 +1,6 @@
+# Default pipeline universe when INGESTION_UNIVERSE is unset or ``subscriptions``
+# (see ``universe.resolve``). For S&P 500 + context symbols, fetch tickers then set
+# ``INGESTION_UNIVERSE=sp500`` (Makefile: ``universe-fetch-sp500``, ``ingestion-sp500``).
 SUBSCRIPTIONS = [
     "AAPL",
     "MSFT",

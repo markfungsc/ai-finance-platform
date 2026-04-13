@@ -25,11 +25,12 @@ What works end-to-end today (local, Postgres-backed):
 - **Training:** `make train` runs [`src/scripts/run_train.py`](src/scripts/run_train.py) (scikit-learn RandomForest, joblib artifact under `models/`).
 - **Evaluation & backtest:** metrics via [`src/ml/evaluate.py`](src/ml/evaluate.py); `make backtest` and `make walk-forward` exercise [`src/ml/backtest/`](src/ml/backtest/).
 - **Inference (CLI):** `make predict` runs [`src/ml/inference/predict.py`](src/ml/inference/predict.py) (optional merge debug output for inspection).
+- **Inference (HTTP + UI):** FastAPI app [`src/api/main.py`](src/api/main.py); Streamlit dashboard [`src/ui/streamlit_app.py`](src/ui/streamlit_app.py). After `make up`, API is at http://localhost:8000 and the UI at http://localhost:8501 (mounts `models/` and `experiments/` from the host; run `make train` first if you have no artifact). For local dev without Compose, use `make serve-api` and `make streamlit` in separate terminals.
 - **Optional news sentiment:** [`src/ml/sentiment/`](src/ml/sentiment/) — FinBERT scores from durable news sources and leakage-safe as-of attach. Current training/inference sentiment block uses daily symbol + market features (`sym_*_d1`, `spy_*_d1`) with neutral fallback.
 
 - **Tests & lint:** `make test` (pytest), `make lint` / `make fmt` (Ruff).
 
-Not here yet: HTTP inference API, containerized app service, experiment tracking, and automated promotion (see roadmap).
+Not here yet: centralized **model registry**, shared **experiment tracking** (beyond local MLflow runs), and **automated promotion** (see roadmap).
 
 
 
@@ -69,8 +70,8 @@ Status: **Delivered** · **In flight** · **Planned**
 
 | Checkpoint | Objective | Status |
 |------------|------------|--------|
-| **W1** | Core data path + baseline ML artifact | **In flight** — data + features + **local** train / eval / backtest / CLI predict **delivered**; **serving API** and registry **planned** |
-| **W2** | Inference API + service packaging | **In flight** — database containerized; **HTTP inference** and full stack images **planned** |
+| **W1** | Core data path + baseline ML artifact | **In flight** — data + features + **local** train / eval / backtest / CLI predict **delivered**; **HTTP API** in Compose **delivered**; **model registry** **planned** |
+| **W2** | Inference API + service packaging | **In flight** — **Compose stack** (Postgres, API, Streamlit UI, Qdrant) **delivered**; hardened CI images and deploy **planned** |
 | **W4** | Experiment tracking & reproducibility | **Planned** — MLflow-class runs, metrics, model lineage |
 | **W6** | Transformer-based financial sentiment | **In flight** — FinBERT + cache + `news_sentiment_mean_z` in dataset/predict; full data coverage TBD |
 | **W8** | Time-series / gradient-boosted forecasting | **Planned** — comparative evaluation under same tracking layer |
@@ -109,12 +110,14 @@ flowchart LR
 
 ```
 src/
+├── api/                # FastAPI inference HTTP service
 ├── database/           # SQLAlchemy engine, query helpers
 ├── data_pipeline/
 │   ├── ingestion/      # Market data → bronze
 │   ├── processing/     # Bronze → silver
 │   └── features/       # Silver → gold
 ├── ml/                 # Dataset, training helpers, backtest, CLI predict
+├── ui/                 # Streamlit dashboard
 └── scripts/            # Entrypoints (e.g. run_train)
 ```
 
@@ -123,7 +126,7 @@ Core feature computation: [`src/data_pipeline/features/build_features.py`](src/d
 ## Requirements
 
 - Python 3.11+
-- Docker Compose (PostgreSQL service)
+- Docker Compose (see [`infra/docker-compose.yml`](infra/docker-compose.yml))
 
 ## Local development
 
@@ -138,19 +141,59 @@ make migrate   # ordered SQL under infra/migrations/
 export DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ai_finance
 ```
 
+### S&P 500 universe (onboarding + backfill)
+
+1. Fetch the current constituent list from Wikipedia into [`data/universe/sp500_symbols.txt`](data/universe/sp500_symbols.txt):
+   - `make universe-fetch-sp500` (runs `python -m universe`).
+2. Ingest OHLCV for **S&P 500 + market context** (QQQ, SPY, ^VIX):
+   - `make ingestion-sp500` (sets `INGESTION_UNIVERSE=sp500`).
+3. Silver + gold:
+   - `make clean`
+   - First-time full feature history: `make features-sp500-backfill` (sets `INGESTION_UNIVERSE=sp500` and `FEATURES_BACKFILL=1`). Later use `make features-sp500` for incremental updates.
+4. Check coverage (optional): `make universe-preflight-sp500` or `make universe-preflight INGESTION_UNIVERSE=sp500` (defaults to `subscriptions` if unset).
+
+**Preflight shows 505/506 (or similar)?** The command exits with status 1 until every resolved symbol has at least one `stock_features` row. The stderr output lists **symbols missing from `stock_features`** (often one thin-history name). Re-run `make features-sp500`, or for stubborn tickers `export INGESTION_UNIVERSE=sp500 FEATURES_BACKFILL=1` and run the features script so the full clean history is recomputed.
+
+Environment:
+
+- `INGESTION_UNIVERSE`: `subscriptions` (default) or `sp500`.
+- `SP500_SYMBOLS_FILE`: path to the ticker file (default `data/universe/sp500_symbols.txt`).
+- `FEATURES_BACKFILL=1`: recompute features from full `clean_stock_prices` history for every symbol in the resolved universe.
+
+Market context (QQQ, SPY, ^VIX) is merged into training features but is **not** part of `TRAIN_SYMBOLS`. After pulling new context columns, **retrain** and refresh `FEATURE_COLUMNS_PATH` / saved models so inference matches the feature vector.
+
+**Compose services** (from repo root, `make up` runs [`infra/docker-compose.yml`](infra/docker-compose.yml)):
+
+| Port | Service |
+|------|---------|
+| 5432 | PostgreSQL (`finance_postgres`) |
+| 8000 | FastAPI (`finance_api`) |
+| 8501 | Streamlit (`finance_ui`) |
+| 6333 | Qdrant (`finance_qdrant`) |
+
 ## Operations (Make)
 
 | Target | Description |
 |--------|-------------|
-| `make up` / `make down` | PostgreSQL via Compose |
+| `make up` / `make down` | Postgres, API, Streamlit UI, and Qdrant via Compose |
+| `make logs` | Follow Compose logs |
 | `make migrate` | Apply migration SQL to the running database |
-| `make ingestion` | Incremental load → `raw_stock_prices` |
+| `make ingestion` | Incremental load → `raw_stock_prices` (uses `INGESTION_UNIVERSE`, default subscriptions) |
+| `make universe-fetch-sp500` | Write `data/universe/sp500_symbols.txt` from Wikipedia |
+| `make ingestion-sp500` | Ingest with `INGESTION_UNIVERSE=sp500` |
+| `make universe-preflight` | Report clean/features coverage; pass `INGESTION_UNIVERSE=sp500` or it defaults to `subscriptions` |
+| `make universe-preflight-sp500` | Same with `INGESTION_UNIVERSE=sp500` (no variable on the command line) |
+| `make features-sp500` | Gold features with `INGESTION_UNIVERSE=sp500` (incremental) |
+| `make features-sp500-backfill` | Full feature recompute for SP500 universe |
+| `make features-backfill` | Full feature recompute for current `INGESTION_UNIVERSE` |
 | `make clean` | Silver transformation |
 | `make features` | Gold feature build / upsert |
 | `make train` | Baseline ML on `stock_features` (Postgres must be up; run ingestion/clean/features first if tables are empty) |
 | `make backtest` | Run backtest driver on loaded dataset + saved model |
 | `make walk-forward` | Walk-forward backtest test script |
 | `make predict` | CLI inference script (`src/ml/inference/predict.py`) |
+| `make serve-api` | Run FastAPI locally on port 8000 (no Docker) |
+| `make streamlit` | Run Streamlit locally on port 8501 (expects API reachable; set `API_BASE_URL` / `INFERENCE_API_BASE_URL` if needed) |
 | `make test` | Pytest (`tests/`) |
 | `make lint` / `make fmt` | Ruff |
 

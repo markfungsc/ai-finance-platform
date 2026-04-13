@@ -1,12 +1,12 @@
 from sqlalchemy.orm import sessionmaker
 
-from constants import SUBSCRIPTIONS
 from data_pipeline.ingestion.load_stock_data import (
     batch_iterator,
     record_stream,
     upsert_batch,
 )
 from database.connection import engine
+from universe.resolve import resolve_ingestion_symbols
 
 Session = sessionmaker(bind=engine)
 
@@ -24,5 +24,4 @@ def run_ingestion(symbols: list[str], batch_size: int = 500):
 
 
 if __name__ == "__main__":
-    symbols = SUBSCRIPTIONS
-    run_ingestion(symbols)
+    run_ingestion(resolve_ingestion_symbols())

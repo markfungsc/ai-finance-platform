@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pandas as pd
 
-from constants import TRAIN_SYMBOLS
+from constants import MARKET_CONTEXT_SYMBOLS, TRAIN_SYMBOLS
 from database.queries import fetch_features, fetch_features_z
 from log_config import get_logger
 from ml.helpers.attach_market_context import attach_market_context
@@ -9,11 +11,38 @@ from ml.sentiment.attach import attach_sentiment_features
 
 logger = get_logger(__name__)
 
+_SP500_SYMBOLS_REL = Path("data") / "universe" / "sp500_symbols.txt"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def get_pooled_dataset_symbols() -> list[str]:
+    """Symbols used for pooled training/backtest (S&P 500 list minus market-context tickers).
+
+    Falls back to ``TRAIN_SYMBOLS`` if the universe file is missing or empty.
+    """
+    path = _repo_root() / _SP500_SYMBOLS_REL
+    if not path.is_file():
+        logger.warning("Pooled universe file missing at %s; using TRAIN_SYMBOLS", path)
+        return list(TRAIN_SYMBOLS)
+    tickers: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            tickers.append(s)
+    out = sorted({s for s in tickers if s not in MARKET_CONTEXT_SYMBOLS})
+    if not out:
+        logger.warning("No symbols loaded from %s; using TRAIN_SYMBOLS", path)
+        return list(TRAIN_SYMBOLS)
+    return out
+
 
 def load_train_dataset(debug_merge: bool = False):
     frames = []
     frames_z = []
-    for symbol in TRAIN_SYMBOLS:
+    for symbol in get_pooled_dataset_symbols():
         df = fetch_features(symbol)
         df_z = fetch_features_z(symbol)
         frames.append(df)

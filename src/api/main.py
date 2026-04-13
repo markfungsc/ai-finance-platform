@@ -15,10 +15,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
-from database.queries import fetch_features_window
+from database.queries import fetch_features, fetch_features_window
 from log_config import get_logger
 from ml.analysis.explanations import (
     global_feature_importance,
+    indicator_context_tags,
     threshold_explanation,
     top_feature_magnitudes,
 )
@@ -62,6 +63,33 @@ BACKTEST_INDICATOR_COLUMNS: list[str] = [
     "bb_pband_20",
 ]
 
+# Subset of columns for Predict tab chart JSON (must exist in fetch_features rows).
+_PREDICT_CHART_SERIALIZE_COLUMNS: tuple[str, ...] = tuple(
+    c for c in BACKTEST_INDICATOR_COLUMNS if c != "symbol"
+)
+
+
+def _serialize_predict_chart_history(df: pd.DataFrame) -> list[dict]:
+    cols = [c for c in _PREDICT_CHART_SERIALIZE_COLUMNS if c in df.columns]
+    if not cols:
+        return []
+    sub = df[cols].copy()
+    return json.loads(sub.to_json(orient="records", date_format="iso"))
+
+
+def _maybe_tail_predict_history(df: pd.DataFrame) -> pd.DataFrame:
+    """Optional cap via PREDICT_UI_MAX_BARS; otherwise full history (max available in DB)."""
+    raw = os.environ.get("PREDICT_UI_MAX_BARS")
+    if not raw or not raw.strip():
+        return df
+    try:
+        n = int(raw)
+    except ValueError:
+        return df
+    if n <= 0:
+        return df
+    return df.tail(n).reset_index(drop=True)
+
 
 class PredictSymbolRequest(BaseModel):
     symbol: str = Field(..., min_length=1, examples=["AAPL"])
@@ -81,6 +109,9 @@ class PredictSymbolExplainResponse(BaseModel):
     reason: str
     top_feature_magnitudes: list[dict]
     global_feature_importance: list[dict]
+    chart_history: list[dict] = Field(default_factory=list)
+    latest_bar_timestamp: str | None = None
+    indicator_context_tags: list[str] = Field(default_factory=list)
 
 
 class ThresholdGridResponse(BaseModel):
@@ -334,6 +365,25 @@ def predict_symbol_explain(body: PredictSymbolRequest):
 
     top_mag_df = top_feature_magnitudes(row.iloc[0], feature_cols, top_n=10)
     global_imp_df = global_feature_importance(app.state.model, feature_cols, top_n=10)
+
+    df_hist = fetch_features(symbol).sort_values("timestamp").reset_index(drop=True)
+    df_hist = _maybe_tail_predict_history(df_hist)
+    chart_history = _serialize_predict_chart_history(df_hist)
+
+    last_merged = _df_merged.iloc[-1]
+    latest_ts = pd.Timestamp(last_merged["timestamp"])
+    latest_bar_timestamp = latest_ts.isoformat()
+
+    vol_roll = (
+        pd.to_numeric(df_hist["volume"], errors="coerce")
+        .rolling(20, min_periods=1)
+        .mean()
+    )
+    v_last = vol_roll.iloc[-1] if len(vol_roll) else np.nan
+    tag_row = last_merged.copy()
+    tag_row["volume_sma_20"] = float(v_last) if pd.notna(v_last) else np.nan
+    ctx_tags = indicator_context_tags(tag_row)
+
     return PredictSymbolExplainResponse(
         symbol=symbol,
         probability_trade_success=p,
@@ -342,6 +392,9 @@ def predict_symbol_explain(body: PredictSymbolRequest):
         reason=reason,
         top_feature_magnitudes=top_mag_df.to_dict(orient="records"),
         global_feature_importance=global_imp_df.to_dict(orient="records"),
+        chart_history=chart_history,
+        latest_bar_timestamp=latest_bar_timestamp,
+        indicator_context_tags=ctx_tags,
     )
 
 
