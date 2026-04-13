@@ -31,9 +31,11 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ai_finance
       MODEL_PATH: /app/models/swing-trade/random_forest_pooled.pkl
       FEATURE_COLUMNS_PATH: /app/models/swing-trade/random_forest_pooled_feature_columns.pkl
+      SP500_SYMBOLS_FILE: /app/data/universe/sp500_symbols.txt
     volumes:
       - ../models:/app/models:ro
       - ../experiments:/app/experiments:ro
+      - ../data:/app/data:ro
     depends_on:
       postgres:
         condition: service_healthy

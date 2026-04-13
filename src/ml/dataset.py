@@ -1,9 +1,12 @@
 from pathlib import Path
 
-import pandas as pd
-
 from constants import MARKET_CONTEXT_SYMBOLS, TRAIN_SYMBOLS
-from database.queries import fetch_features, fetch_features_z
+from database.queries import (
+    fetch_features,
+    fetch_features_many,
+    fetch_features_z,
+    fetch_features_z_many,
+)
 from log_config import get_logger
 from ml.helpers.attach_market_context import attach_market_context
 from ml.helpers.merge_features import merge_features_with_target
@@ -40,16 +43,10 @@ def get_pooled_dataset_symbols() -> list[str]:
 
 
 def load_train_dataset(debug_merge: bool = False):
-    frames = []
-    frames_z = []
-    for symbol in get_pooled_dataset_symbols():
-        df = fetch_features(symbol)
-        df_z = fetch_features_z(symbol)
-        frames.append(df)
-        frames_z.append(df_z)
-
-    df_all = pd.concat(frames, ignore_index=True)
-    df_z_all = pd.concat(frames_z, ignore_index=True)
+    syms = get_pooled_dataset_symbols()
+    # Sequential fetch + no inner chunk parallelism keeps peak RAM lower (OOM on large pools).
+    df_all = fetch_features_many(syms, parallel=False, max_workers=1)
+    df_z_all = fetch_features_z_many(syms, parallel=False, max_workers=1)
     df_all = df_all.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     df_z_all = df_z_all.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     # single context attach

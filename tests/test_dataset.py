@@ -136,8 +136,8 @@ class TestLoadDataset:
 
     @patch("ml.helpers.merge_features.generate_trade_labels")
     @patch("ml.dataset.attach_market_context")
-    @patch("ml.dataset.fetch_features_z")
-    @patch("ml.dataset.fetch_features")
+    @patch("ml.dataset.fetch_features_z_many")
+    @patch("ml.dataset.fetch_features_many")
     @patch(
         "ml.dataset.get_pooled_dataset_symbols",
         return_value=["AAPL", "MSFT"],
@@ -145,8 +145,8 @@ class TestLoadDataset:
     def test_load_train_dataset_sorts_pooled_input_before_context_attach(
         self,
         _mock_get_pooled: object,
-        mock_fetch: object,
-        mock_fetch_z: object,
+        mock_fetch_many: object,
+        mock_fetch_z_many: object,
         mock_attach_context: object,
         mock_labels: object,
     ) -> None:
@@ -162,10 +162,12 @@ class TestLoadDataset:
             ::-1
         ]
 
-        feature_by_symbol = {"AAPL": df_aapl, "MSFT": df_msft}
-        z_by_symbol = {"AAPL": z_aapl, "MSFT": z_msft}
-        mock_fetch.side_effect = lambda symbol: feature_by_symbol[symbol]
-        mock_fetch_z.side_effect = lambda symbol: z_by_symbol[symbol]
+        mock_fetch_many.return_value = pd.concat(
+            [df_aapl, df_msft], ignore_index=True
+        )
+        mock_fetch_z_many.return_value = pd.concat(
+            [z_aapl, z_msft], ignore_index=True
+        )
 
         def _assert_sorted_and_attach(df_z_in: pd.DataFrame) -> pd.DataFrame:
             sorted_copy = (

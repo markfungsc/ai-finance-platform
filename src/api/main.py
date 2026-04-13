@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock, Thread
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 
 from constants import EXPERIMENT_STRATEGY_SLUG, THRESHOLD
+from data_pipeline.features.build_features import run_feature_pipeline
+from data_pipeline.ingestion.run_ingestion import run_ingestion
+from data_pipeline.processing.clean_prices import clean_prices
+from database.connection import engine
 from database.queries import fetch_features, fetch_features_window
 from log_config import get_logger
 from ml.analysis.explanations import (
@@ -23,12 +32,14 @@ from ml.analysis.explanations import (
     threshold_explanation,
     top_feature_magnitudes,
 )
-from ml.dataset import load_dataset
+from ml.dataset import get_pooled_dataset_symbols, load_dataset
 from ml.inference.api_inference import predict_trade_success_probability
 from ml.models.save_loads import load_feature_columns, load_model, load_scaler
 from ui.backtest_tab import load_backtest_csv
+from universe.resolve import resolve_ingestion_symbols
 
 logger = get_logger(__name__)
+Session = sessionmaker(bind=engine)
 
 # Defaults match pooled experiments (see run_experiment / backtest saved names).
 # Project root: .../src/api/main.py -> parents[2] == repo root
@@ -41,6 +52,28 @@ _DEFAULT_FEATURE_COL_REL = (
     / EXPERIMENT_STRATEGY_SLUG
     / "random_forest_pooled_feature_columns.pkl"
 )
+
+_refresh_lock = Lock()
+_refresh_thread: Thread | None = None
+_refresh_state: dict[str, object | None] = {
+    "status": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "elapsed_ms": 0,
+    "error": None,
+    "latest_common_timestamp": None,
+    "last_market_close_utc": None,
+}
+_scan_lock = Lock()
+_scan_thread: Thread | None = None
+_scan_state: dict[str, object | None] = {
+    "status": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "elapsed_ms": 0,
+    "error": None,
+    "result": None,
+}
 
 BACKTEST_INDICATOR_COLUMNS: list[str] = [
     "symbol",
@@ -117,6 +150,55 @@ class PredictSymbolExplainResponse(BaseModel):
 class ThresholdGridResponse(BaseModel):
     best_threshold: float
     grid: list[dict]
+
+
+class ScannerRequest(BaseModel):
+    top_n: int = Field(default=5, ge=1, le=50)
+    max_symbols: int | None = Field(default=None, ge=1, le=2000)
+    max_workers: int | None = Field(default=None, ge=1, le=32)
+    min_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ScannerRow(BaseModel):
+    symbol: str
+    probability_trade_success: float
+    threshold_used: float
+    should_trade: bool
+
+
+class ScannerErrorRow(BaseModel):
+    symbol: str
+    error: str
+
+
+class ScannerResponse(BaseModel):
+    top: list[ScannerRow]
+    errors: list[ScannerErrorRow]
+    evaluated_count: int
+    error_count: int
+    refresh_status: str
+    refresh_elapsed_ms: int
+    scan_elapsed_ms: int
+    duration_ms: int
+
+
+class ScannerRefreshStatusResponse(BaseModel):
+    status: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    elapsed_ms: int = 0
+    error: str | None = None
+    latest_common_timestamp: str | None = None
+    last_market_close_utc: str | None = None
+
+
+class ScannerScanStatusResponse(BaseModel):
+    status: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    elapsed_ms: int = 0
+    error: str | None = None
+    result: ScannerResponse | None = None
 
 
 class BacktestIndicatorsRow(BaseModel):
@@ -255,6 +337,171 @@ def _load_artifacts():
         len(threshold_grid),
     )
     return model, feature_cols, scaler, best_threshold, threshold_grid
+
+
+_FRESHNESS_TABLES = frozenset(
+    {"clean_stock_prices", "stock_features", "stock_features_zscore"}
+)
+
+
+def _ts_to_utc(ts) -> pd.Timestamp:
+    out = pd.Timestamp(ts)
+    if out.tzinfo is None:
+        return out.tz_localize("UTC")
+    return out.tz_convert("UTC")
+
+
+def _max_timestamp_per_symbol(table_name: str) -> dict[str, pd.Timestamp]:
+    """Latest bar timestamp per symbol for ``table_name`` (UTC)."""
+    if table_name not in _FRESHNESS_TABLES:
+        raise ValueError(f"unsupported table for freshness: {table_name!r}")
+    query = text(
+        f"SELECT symbol, MAX(timestamp) AS ts FROM {table_name} GROUP BY symbol"
+    )
+    out: dict[str, pd.Timestamp] = {}
+    with engine.connect() as conn:
+        rows = conn.execute(query).fetchall()
+    for sym, ts in rows:
+        if sym is None or ts is None:
+            continue
+        out[str(sym).strip().upper()] = _ts_to_utc(ts)
+    return out
+
+
+def _last_market_close_utc(now_utc: pd.Timestamp | None = None) -> pd.Timestamp:
+    now = now_utc or pd.Timestamp.now(tz="UTC")
+    close_hour_raw = os.environ.get("MARKET_CLOSE_UTC_HOUR", "21").strip()
+    try:
+        close_hour = int(close_hour_raw)
+    except ValueError:
+        close_hour = 21
+    close_hour = max(0, min(23, close_hour))
+
+    close_today = now.normalize() + pd.Timedelta(hours=close_hour)
+    if now.weekday() < 5 and now >= close_today:
+        candidate = close_today
+    else:
+        candidate = close_today - pd.Timedelta(days=1)
+
+    while candidate.weekday() >= 5:
+        candidate -= pd.Timedelta(days=1)
+    return candidate
+
+
+def _is_market_data_fresh_for_symbols(
+    symbols: list[str],
+) -> tuple[bool, pd.Timestamp | None, pd.Timestamp, list[str]]:
+    """True iff every expected symbol has clean + features + z rows through ``last_close``.
+
+    Uses per-symbol ``min(ts_clean, ts_feat, ts_feat_z) >= last_close`` so one lagging
+    ticker cannot be hidden by a global MAX(timestamp).
+    """
+    last_close = _last_market_close_utc()
+    if not symbols:
+        return False, None, last_close, []
+
+    norm = [s.strip().upper() for s in symbols if s and str(s).strip()]
+    if not norm:
+        return False, None, last_close, []
+
+    d_clean = _max_timestamp_per_symbol("clean_stock_prices")
+    d_feat = _max_timestamp_per_symbol("stock_features")
+    d_z = _max_timestamp_per_symbol("stock_features_zscore")
+
+    stale: list[str] = []
+    per_symbol_floor: list[pd.Timestamp] = []
+    for sym in norm:
+        t1 = d_clean.get(sym)
+        t2 = d_feat.get(sym)
+        t3 = d_z.get(sym)
+        if t1 is None or t2 is None or t3 is None:
+            stale.append(sym)
+            continue
+        floor = min(t1, t2, t3)
+        if floor < last_close:
+            stale.append(sym)
+            continue
+        per_symbol_floor.append(floor)
+
+    fresh = len(stale) == 0 and len(per_symbol_floor) == len(norm)
+    bottleneck = (
+        min(per_symbol_floor) if len(per_symbol_floor) == len(norm) and norm else None
+    )
+    if stale:
+        sample = stale[:15]
+        logger.info(
+            "market data stale for %d/%d symbols (sample): %s",
+            len(stale),
+            len(norm),
+            sample,
+        )
+    return fresh, bottleneck, last_close, stale
+
+
+def _refresh_snapshot() -> dict[str, object | None]:
+    with _refresh_lock:
+        return dict(_refresh_state)
+
+
+def _refresh_update(**kwargs: object) -> None:
+    with _refresh_lock:
+        _refresh_state.update(kwargs)
+
+
+def _scan_snapshot() -> dict[str, object | None]:
+    with _scan_lock:
+        return dict(_scan_state)
+
+
+def _scan_update(**kwargs: object) -> None:
+    with _scan_lock:
+        _scan_state.update(kwargs)
+
+
+def _run_refresh_pipeline_for_symbols(symbols: list[str]) -> None:
+    run_ingestion(symbols)
+    with Session() as session:
+        for symbol in symbols:
+            clean_prices(session, symbol)
+    for symbol in symbols:
+        run_feature_pipeline(symbol, backfill=False)
+
+
+def _refresh_worker(symbols: list[str]) -> None:
+    global _refresh_thread
+    t0 = time.perf_counter()
+    try:
+        _run_refresh_pipeline_for_symbols(symbols)
+        fresh_after, latest_after, close_after, stale_after = _is_market_data_fresh_for_symbols(
+            symbols
+        )
+        if not fresh_after:
+            raise RuntimeError(
+                "refresh completed but data is still stale "
+                f"(latest_common={latest_after}, last_close={close_after}, "
+                f"stale_count={len(stale_after)}, stale_sample={stale_after[:20]})"
+            )
+        _refresh_update(
+            status="succeeded",
+            finished_at=pd.Timestamp.now(tz="UTC").isoformat(),
+            elapsed_ms=int((time.perf_counter() - t0) * 1000),
+            error=None,
+            latest_common_timestamp=latest_after.isoformat()
+            if latest_after is not None
+            else None,
+            last_market_close_utc=close_after.isoformat(),
+        )
+    except Exception as e:
+        _refresh_update(
+            status="failed",
+            finished_at=pd.Timestamp.now(tz="UTC").isoformat(),
+            elapsed_ms=int((time.perf_counter() - t0) * 1000),
+            error=str(e),
+        )
+        logger.exception("scanner refresh job failed")
+    finally:
+        with _refresh_lock:
+            _refresh_thread = None
 
 
 @asynccontextmanager
@@ -404,6 +651,196 @@ def threshold_grid():
         best_threshold=float(app.state.best_threshold),
         grid=app.state.threshold_grid or [],
     )
+
+
+@app.post("/scanner/refresh/start", response_model=ScannerRefreshStatusResponse)
+def scanner_refresh_start():
+    global _refresh_thread
+    snap = _refresh_snapshot()
+    if snap.get("status") == "running":
+        return ScannerRefreshStatusResponse(**snap)
+
+    symbols = resolve_ingestion_symbols()
+    fresh, latest_common, last_close, _stale = _is_market_data_fresh_for_symbols(symbols)
+    if fresh:
+        _refresh_update(
+            status="skipped_up_to_date",
+            started_at=pd.Timestamp.now(tz="UTC").isoformat(),
+            finished_at=pd.Timestamp.now(tz="UTC").isoformat(),
+            elapsed_ms=0,
+            error=None,
+            latest_common_timestamp=latest_common.isoformat()
+            if latest_common is not None
+            else None,
+            last_market_close_utc=last_close.isoformat(),
+        )
+        return ScannerRefreshStatusResponse(**_refresh_snapshot())
+
+    _refresh_update(
+        status="running",
+        started_at=pd.Timestamp.now(tz="UTC").isoformat(),
+        finished_at=None,
+        elapsed_ms=0,
+        error=None,
+        latest_common_timestamp=latest_common.isoformat()
+        if latest_common is not None
+        else None,
+        last_market_close_utc=last_close.isoformat(),
+    )
+    _refresh_thread = Thread(target=_refresh_worker, args=(symbols,), daemon=True)
+    _refresh_thread.start()
+    return ScannerRefreshStatusResponse(**_refresh_snapshot())
+
+
+@app.get("/scanner/refresh/status", response_model=ScannerRefreshStatusResponse)
+def scanner_refresh_status():
+    return ScannerRefreshStatusResponse(**_refresh_snapshot())
+
+
+def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
+    started = time.perf_counter()
+    refresh = _refresh_snapshot()
+    refresh_status = str(refresh.get("status", "idle"))
+    if refresh_status not in {"succeeded", "skipped_up_to_date"}:
+        detail = "refresh must be completed before scanning"
+        if refresh_status == "failed" and refresh.get("error"):
+            detail = f"refresh failed: {refresh.get('error')}"
+        elif refresh_status == "running":
+            detail = "refresh is running; wait until completion"
+        raise HTTPException(status_code=503, detail=detail)
+
+    symbols = get_pooled_dataset_symbols()
+    if body.max_symbols is not None:
+        symbols = symbols[: int(body.max_symbols)]
+    if not symbols:
+        return ScannerResponse(
+            top=[],
+            errors=[],
+            evaluated_count=0,
+            error_count=0,
+            refresh_status=refresh_status,
+            refresh_elapsed_ms=int(refresh.get("elapsed_ms", 0)),
+            scan_elapsed_ms=0,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    top_n = int(body.top_n)
+    min_p = float(body.min_probability) if body.min_probability is not None else None
+    env_workers = os.environ.get("SCAN_MAX_WORKERS", "4").strip()
+    try:
+        default_workers = int(env_workers)
+    except ValueError:
+        default_workers = 4
+    workers = max(1, min(len(symbols), int(body.max_workers or default_workers)))
+    threshold_used = float(app.state.best_threshold)
+
+    scan_start = time.perf_counter()
+    scored: list[ScannerRow] = []
+    errors: list[ScannerErrorRow] = []
+
+    def _score_symbol(sym: str) -> float:
+        return float(
+            predict_trade_success_probability(
+                sym,
+                app.state.model,
+                app.state.feature_cols,
+                app.state.scaler,
+                quiet=True,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_score_symbol, sym): sym for sym in symbols}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                p = float(fut.result())
+                if min_p is not None and p < min_p:
+                    continue
+                scored.append(
+                    ScannerRow(
+                        symbol=sym,
+                        probability_trade_success=p,
+                        threshold_used=threshold_used,
+                        should_trade=bool(p > threshold_used),
+                    )
+                )
+            except Exception as e:
+                errors.append(ScannerErrorRow(symbol=sym, error=str(e)))
+
+    scored.sort(
+        key=lambda r: (-float(r.probability_trade_success), str(r.symbol).upper())
+    )
+    top = scored[:top_n]
+    scan_elapsed_ms = int((time.perf_counter() - scan_start) * 1000)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    return ScannerResponse(
+        top=top,
+        errors=errors,
+        evaluated_count=len(symbols),
+        error_count=len(errors),
+        refresh_status=refresh_status,
+        refresh_elapsed_ms=int(refresh.get("elapsed_ms", 0)),
+        scan_elapsed_ms=scan_elapsed_ms,
+        duration_ms=duration_ms,
+    )
+
+
+def _scan_worker(body: ScannerRequest) -> None:
+    global _scan_thread
+    t0 = time.perf_counter()
+    try:
+        result = _run_scan_core(body)
+        _scan_update(
+            status="succeeded",
+            finished_at=pd.Timestamp.now(tz="UTC").isoformat(),
+            elapsed_ms=int((time.perf_counter() - t0) * 1000),
+            error=None,
+            result=result.model_dump(),
+        )
+    except Exception as e:
+        _scan_update(
+            status="failed",
+            finished_at=pd.Timestamp.now(tz="UTC").isoformat(),
+            elapsed_ms=int((time.perf_counter() - t0) * 1000),
+            error=str(e),
+            result=None,
+        )
+        logger.exception("scanner scan job failed")
+    finally:
+        with _scan_lock:
+            _scan_thread = None
+
+
+@app.post("/scanner/scan/start", response_model=ScannerScanStatusResponse)
+def scanner_scan_start(body: ScannerRequest):
+    global _scan_thread
+    snap = _scan_snapshot()
+    if snap.get("status") == "running":
+        return ScannerScanStatusResponse(**snap)
+
+    _scan_update(
+        status="running",
+        started_at=pd.Timestamp.now(tz="UTC").isoformat(),
+        finished_at=None,
+        elapsed_ms=0,
+        error=None,
+        result=None,
+    )
+    _scan_thread = Thread(target=_scan_worker, args=(body,), daemon=True)
+    _scan_thread.start()
+    return ScannerScanStatusResponse(**_scan_snapshot())
+
+
+@app.get("/scanner/scan/status", response_model=ScannerScanStatusResponse)
+def scanner_scan_status():
+    return ScannerScanStatusResponse(**_scan_snapshot())
+
+
+@app.post("/scan_symbols", response_model=ScannerResponse)
+def scan_symbols(body: ScannerRequest):
+    # Backward-compatible synchronous endpoint.
+    return _run_scan_core(body)
 
 
 @app.get("/backtest/indicators", response_model=list[BacktestIndicatorsRow])

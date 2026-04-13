@@ -9,6 +9,7 @@ Or:             streamlit run src/ui/streamlit_app.py
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import pandas as pd
@@ -78,8 +79,8 @@ def main() -> None:
         art_default = str(default_artifacts_root())
         art_input = st.text_input("Artifacts folder", value=art_default, key="art_root")
 
-    tab_predict, tab_grid, tab_backtest = st.tabs(
-        ["Predict", "Threshold grid", "Backtest"]
+    tab_predict, tab_scanner, tab_grid, tab_backtest = st.tabs(
+        ["Predict", "Scanner", "Threshold grid", "Backtest"]
     )
 
     with tab_predict:
@@ -135,6 +136,106 @@ def main() -> None:
                 st.error(str(e))
             except Exception as e:
                 st.exception(e)
+
+    with tab_scanner:
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            top_n = st.number_input("Top N", min_value=1, max_value=50, value=5, step=1)
+        with c2:
+            max_symbols = st.number_input(
+                "Max symbols (0 = all)",
+                min_value=0,
+                max_value=2000,
+                value=0,
+                step=1,
+            )
+        with c3:
+            max_workers = st.number_input(
+                "Max workers (0 = server default)",
+                min_value=0,
+                max_value=32,
+                value=0,
+                step=1,
+            )
+        min_prob = st.slider("Min probability filter", 0.0, 1.0, 0.0, 0.01)
+        run_scan = st.button("Run scanner", type="primary")
+
+        if run_scan:
+            body: dict[str, Any] = {"top_n": int(top_n)}
+            if int(max_symbols) > 0:
+                body["max_symbols"] = int(max_symbols)
+            if int(max_workers) > 0:
+                body["max_workers"] = int(max_workers)
+            if float(min_prob) > 0.0:
+                body["min_probability"] = float(min_prob)
+
+            status_ph = st.empty()
+            with st.spinner("Starting refresh job..."):
+                try:
+                    _post("/scanner/refresh/start", {}, timeout=20)
+                except requests.HTTPError as e:
+                    st.error(str(e))
+                    data = None
+                except Exception as e:
+                    st.exception(e)
+                    data = None
+                else:
+                    data = None
+                    # Poll refresh status, then run scan when ready.
+                    for _ in range(1800):  # ~60 minutes max at 2s polling
+                        s = _get("/scanner/refresh/status", timeout=20)
+                        rs = str(s.get("status", "idle"))
+                        status_ph.info(
+                            "Refresh status: "
+                            f"{rs} | elapsed_ms={int(s.get('elapsed_ms', 0))}"
+                        )
+                        if rs in {"succeeded", "skipped_up_to_date"}:
+                            _post("/scanner/scan/start", body, timeout=20)
+                            for _ in range(3600):  # ~120 minutes max at 2s polling
+                                ss = _get("/scanner/scan/status", timeout=20)
+                                scan_status = str(ss.get("status", "idle"))
+                                status_ph.info(
+                                    "Refresh status: "
+                                    f"{rs} | Scan status: {scan_status} "
+                                    f"| scan_elapsed_ms={int(ss.get('elapsed_ms', 0))}"
+                                )
+                                if scan_status == "succeeded":
+                                    data = ss.get("result")
+                                    break
+                                if scan_status == "failed":
+                                    st.error(f"Scan failed: {ss.get('error')}")
+                                    break
+                                time.sleep(2)
+                            break
+                        if rs == "failed":
+                            st.error(f"Refresh failed: {s.get('error')}")
+                            break
+                        time.sleep(2)
+
+            if data:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Evaluated", int(data.get("evaluated_count", 0)))
+                m2.metric("Errors", int(data.get("error_count", 0)))
+                m3.metric("Refresh status", str(data.get("refresh_status", "unknown")))
+                m4.metric("Elapsed (ms)", int(data.get("duration_ms", 0)))
+
+                top_df = pd.DataFrame(data.get("top") or [])
+                if top_df.empty:
+                    st.info("No scanner candidates found.")
+                else:
+                    st.subheader("Top scanner candidates")
+                    st.dataframe(top_df, width="stretch", height=260)
+                    st.download_button(
+                        "Download top CSV",
+                        data=top_df.to_csv(index=False),
+                        file_name="scanner_top.csv",
+                        mime="text/csv",
+                    )
+
+                err_df = pd.DataFrame(data.get("errors") or [])
+                if not err_df.empty:
+                    with st.expander("Per-symbol errors"):
+                        st.dataframe(err_df, width="stretch", height=200)
 
     with tab_grid:
         if st.button("Load threshold grid"):

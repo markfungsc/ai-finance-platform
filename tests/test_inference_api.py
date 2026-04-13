@@ -224,3 +224,282 @@ def test_threshold_grid_endpoint_loads(tmp_path, monkeypatch):
     assert payload["best_threshold"] == pytest.approx(0.42)
     assert len(payload["grid"]) == 1
     assert payload["grid"][0]["threshold"] == pytest.approx(0.3)
+
+
+def test_scan_symbols_top_ordering(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    probs = {"AAPL": 0.8, "MSFT": 0.3, "NVDA": 0.9, "TSLA": 0.7}
+
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main,
+            "_refresh_snapshot",
+            return_value={"status": "succeeded", "elapsed_ms": 1},
+        ), patch.object(
+            api_main,
+            "get_pooled_dataset_symbols",
+            return_value=["AAPL", "MSFT", "NVDA", "TSLA"],
+        ), patch.object(
+            api_main,
+            "predict_trade_success_probability",
+            side_effect=lambda symbol, *args, **kwargs: probs[symbol],
+        ):
+            r = client.post("/scan_symbols", json={"top_n": 2})
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["evaluated_count"] == 4
+    assert payload["error_count"] == 0
+    assert [row["symbol"] for row in payload["top"]] == ["NVDA", "AAPL"]
+
+
+def test_scan_symbols_partial_errors(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    def _predict(symbol, *_args, **_kwargs):
+        if symbol == "BAD":
+            raise ValueError("no rows")
+        return {"AAPL": 0.61, "MSFT": 0.59}[symbol]
+
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main,
+            "_refresh_snapshot",
+            return_value={"status": "succeeded", "elapsed_ms": 1},
+        ), patch.object(
+            api_main,
+            "get_pooled_dataset_symbols",
+            return_value=["AAPL", "BAD", "MSFT"],
+        ), patch.object(
+            api_main,
+            "predict_trade_success_probability",
+            side_effect=_predict,
+        ):
+            r = client.post("/scan_symbols", json={"top_n": 5})
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["evaluated_count"] == 3
+    assert payload["error_count"] == 1
+    assert [row["symbol"] for row in payload["top"]] == ["AAPL", "MSFT"]
+    assert payload["errors"][0]["symbol"] == "BAD"
+
+
+def test_is_market_data_fresh_for_symbols_all_symbols_current():
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    last_close = pd.Timestamp("2026-01-02T21:00:00Z")
+
+    def _same_per_sym(_table: str) -> dict[str, pd.Timestamp]:
+        return {"AAPL": last_close, "MSFT": last_close}
+
+    with patch.object(
+        api_main, "_last_market_close_utc", return_value=last_close
+    ), patch.object(
+        api_main, "_max_timestamp_per_symbol", side_effect=_same_per_sym
+    ):
+        fresh, bottleneck, lc, stale = api_main._is_market_data_fresh_for_symbols(
+            ["AAPL", "MSFT"]
+        )
+
+    assert fresh is True
+    assert stale == []
+    assert bottleneck == last_close
+    assert lc == last_close
+
+
+def test_is_market_data_fresh_for_symbols_stale_when_one_symbol_behind():
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    last_close = pd.Timestamp("2026-01-02T21:00:00Z")
+    old = pd.Timestamp("2025-12-01T21:00:00Z")
+
+    def _mixed(_table: str) -> dict[str, pd.Timestamp]:
+        return {"AAPL": last_close, "MSFT": old}
+
+    with patch.object(
+        api_main, "_last_market_close_utc", return_value=last_close
+    ), patch.object(
+        api_main, "_max_timestamp_per_symbol", side_effect=_mixed
+    ):
+        fresh, bottleneck, lc, stale = api_main._is_market_data_fresh_for_symbols(
+            ["AAPL", "MSFT"]
+        )
+
+    assert fresh is False
+    assert "MSFT" in stale
+    assert bottleneck is None
+    assert lc == last_close
+
+
+def test_scanner_refresh_status_skip_when_fresh(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    now = pd.Timestamp("2026-01-02T22:00:00Z")
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main,
+            "_is_market_data_fresh_for_symbols",
+            return_value=(True, now, now, []),
+        ):
+            r = client.post("/scanner/refresh/start")
+            s = client.get("/scanner/refresh/status")
+
+    assert r.status_code == 200
+    assert s.status_code == 200
+    assert r.json()["status"] == "skipped_up_to_date"
+    assert s.json()["status"] == "skipped_up_to_date"
+
+
+def test_scan_symbols_blocked_when_refresh_failed(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main,
+            "_refresh_snapshot",
+            return_value={"status": "failed", "elapsed_ms": 1, "error": "boom"},
+        ):
+            r = client.post("/scan_symbols", json={"top_n": 5})
+
+    assert r.status_code == 503
+    assert "refresh failed" in r.json()["detail"]
+
+
+def test_scanner_scan_job_lifecycle_success(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target = target
+            self._args = args
+
+        def start(self):
+            if self._target:
+                self._target(*self._args)
+
+    result_payload = {
+        "top": [
+            {
+                "symbol": "NVDA",
+                "probability_trade_success": 0.9,
+                "threshold_used": 0.33,
+                "should_trade": True,
+            }
+        ],
+        "errors": [],
+        "evaluated_count": 4,
+        "error_count": 0,
+        "refresh_status": "succeeded",
+        "refresh_elapsed_ms": 12,
+        "scan_elapsed_ms": 21,
+        "duration_ms": 23,
+    }
+
+    with TestClient(api_main.app) as client:
+        with patch.object(api_main, "Thread", _ImmediateThread), patch.object(
+            api_main,
+            "_run_scan_core",
+            return_value=api_main.ScannerResponse(**result_payload),
+        ):
+            r_start = client.post("/scanner/scan/start", json={"top_n": 5})
+            r_status = client.get("/scanner/scan/status")
+
+    assert r_start.status_code == 200
+    assert r_status.status_code == 200
+    assert r_status.json()["status"] == "succeeded"
+    assert r_status.json()["result"]["top"][0]["symbol"] == "NVDA"
+
+
+def test_scanner_scan_job_lifecycle_failed(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target = target
+            self._args = args
+
+        def start(self):
+            if self._target:
+                self._target(*self._args)
+
+    with TestClient(api_main.app) as client:
+        with patch.object(api_main, "Thread", _ImmediateThread), patch.object(
+            api_main, "_run_scan_core", side_effect=RuntimeError("scan boom")
+        ):
+            r_start = client.post("/scanner/scan/start", json={"top_n": 5})
+            r_status = client.get("/scanner/scan/status")
+
+    assert r_start.status_code == 200
+    assert r_status.status_code == 200
+    assert r_status.json()["status"] == "failed"
+    assert "scan boom" in (r_status.json().get("error") or "")

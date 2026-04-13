@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import pandas as pd
 from sqlalchemy import text
 
@@ -9,6 +11,36 @@ BATCH_SIZE = 5000
 # Non-key columns on stock_features; NULL in any of these means a partial / pre-migration row.
 STOCK_FEATURES_VALUE_COLUMNS = ("close", *BASE_FEATURE_COLUMNS)
 STOCK_FEATURES_ZSCORE_VALUE_COLUMNS = z_columns(STOCK_FEATURES_VALUE_COLUMNS)
+
+FEATURE_FETCH_SYMBOL_CHUNK = 128
+FEATURE_FETCH_MAX_WORKERS = 8
+
+_RAW_PRICE_COLS_FOR_JOIN = frozenset({"open", "high", "low", "close", "volume"})
+_FEATURE_JOIN_EXTRA_COLS = [
+    c for c in STOCK_FEATURES_VALUE_COLUMNS if c not in _RAW_PRICE_COLS_FOR_JOIN
+]
+_FEATURE_JOIN_F_SQL = ", ".join(f"f.{c}" for c in _FEATURE_JOIN_EXTRA_COLS)
+_FETCH_FEATURES_MANY_SQL = f"""
+    SELECT
+        p.symbol,
+        p.timestamp,
+        p.open,
+        p.high,
+        p.low,
+        p.close,
+        p.volume,
+        {_FEATURE_JOIN_F_SQL}
+    FROM clean_stock_prices p
+    JOIN stock_features f ON p.symbol = f.symbol AND p.timestamp = f.timestamp
+    WHERE p.symbol = ANY(:symbols)
+    ORDER BY p.symbol, p.timestamp
+"""
+_FETCH_Z_MANY_SQL = """
+    SELECT *
+    FROM stock_features_zscore
+    WHERE symbol = ANY(:symbols)
+    ORDER BY symbol, timestamp
+"""
 
 
 def delete_incomplete_stock_feature_rows(symbol: str) -> int:
@@ -197,39 +229,78 @@ def upsert_features_z(records: list[dict]):
             conn.execute(query, batch)
 
 
-def fetch_features(symbol: str):
-    _raw_cols = {"open", "high", "low", "close", "volume"}
-    _f_cols = [c for c in STOCK_FEATURES_VALUE_COLUMNS if c not in _raw_cols]
-    _f_sql = ", ".join(f"f.{c}" for c in _f_cols)
-    query = text(f"""
-        SELECT
-            p.symbol,
-            p.timestamp,
-            p.open,
-            p.high,
-            p.low,
-            p.close,
-            p.volume,
-            {_f_sql}
-        FROM clean_stock_prices p
-        JOIN stock_features f ON p.symbol = f.symbol AND p.timestamp = f.timestamp
-        WHERE p.symbol = :symbol
-        ORDER BY p.timestamp
-    """)
-
+def _read_features_chunk(symbols_chunk: list[str]) -> pd.DataFrame:
+    if not symbols_chunk:
+        return pd.DataFrame()
+    query = text(_FETCH_FEATURES_MANY_SQL)
     with engine.connect() as conn:
-        return pd.read_sql(query, conn, params={"symbol": symbol})
+        return pd.read_sql(query, conn, params={"symbols": list(symbols_chunk)})
+
+
+def _read_features_z_chunk(symbols_chunk: list[str]) -> pd.DataFrame:
+    if not symbols_chunk:
+        return pd.DataFrame()
+    query = text(_FETCH_Z_MANY_SQL)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"symbols": list(symbols_chunk)})
+
+
+def fetch_features_many(
+    symbols: list[str],
+    *,
+    chunk_size: int = FEATURE_FETCH_SYMBOL_CHUNK,
+    max_workers: int = FEATURE_FETCH_MAX_WORKERS,
+    parallel: bool = True,
+) -> pd.DataFrame:
+    """Load joined clean prices + stock_features for many symbols (batched ANY + optional parallel chunks)."""
+    unique = list(dict.fromkeys(symbols))
+    if not unique:
+        return pd.DataFrame()
+    chunks = [unique[i : i + chunk_size] for i in range(0, len(unique), chunk_size)]
+    if not parallel or len(chunks) == 1:
+        frames = [_read_features_chunk(ch) for ch in chunks]
+    else:
+        workers = min(max_workers, len(chunks))
+        frames = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_read_features_chunk, ch) for ch in chunks]
+            for fut in as_completed(futures):
+                frames.append(fut.result())
+    out = pd.concat(frames, ignore_index=True)
+    return out.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+
+def fetch_features_z_many(
+    symbols: list[str],
+    *,
+    chunk_size: int = FEATURE_FETCH_SYMBOL_CHUNK,
+    max_workers: int = FEATURE_FETCH_MAX_WORKERS,
+    parallel: bool = True,
+) -> pd.DataFrame:
+    """Load z-score feature rows for many symbols (batched ANY + optional parallel chunks)."""
+    unique = list(dict.fromkeys(symbols))
+    if not unique:
+        return pd.DataFrame()
+    chunks = [unique[i : i + chunk_size] for i in range(0, len(unique), chunk_size)]
+    if not parallel or len(chunks) == 1:
+        frames = [_read_features_z_chunk(ch) for ch in chunks]
+    else:
+        workers = min(max_workers, len(chunks))
+        frames = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_read_features_z_chunk, ch) for ch in chunks]
+            for fut in as_completed(futures):
+                frames.append(fut.result())
+    out = pd.concat(frames, ignore_index=True)
+    return out.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+
+def fetch_features(symbol: str):
+    return fetch_features_many([symbol], chunk_size=1, max_workers=1, parallel=False)
 
 
 def fetch_features_z(symbol: str):
-    query = text("""
-        SELECT *
-        FROM stock_features_zscore
-        WHERE symbol = :symbol
-        ORDER BY timestamp
-    """)
-    with engine.connect() as conn:
-        return pd.read_sql(query, conn, params={"symbol": symbol})
+    return fetch_features_z_many([symbol], chunk_size=1, max_workers=1, parallel=False)
 
 
 def fetch_features_window(symbols: list[str], ts_min, ts_max) -> pd.DataFrame:

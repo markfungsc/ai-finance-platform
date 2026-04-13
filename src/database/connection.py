@@ -17,4 +17,7 @@ engine = create_engine(
     DATABASE_URL,
     connect_args={"connect_timeout": 15},
     pool_pre_ping=True,
+    # Parallel chunked feature reads (see database.queries fetch_features_many) need headroom.
+    pool_size=12,
+    max_overflow=8,
 )
