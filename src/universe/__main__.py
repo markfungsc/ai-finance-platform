@@ -11,7 +11,9 @@ from universe.sp500 import fetch_sp500_symbols_from_wikipedia, write_symbol_file
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Fetch S&P 500 symbols and save to a text file.")
+    p = argparse.ArgumentParser(
+        description="Fetch S&P 500 symbols and save to a text file."
+    )
     p.add_argument(
         "-o",
         "--output",

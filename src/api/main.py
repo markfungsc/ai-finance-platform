@@ -33,7 +33,11 @@ from ml.analysis.explanations import (
     threshold_explanation,
     top_feature_magnitudes,
 )
-from ml.dataset import get_pooled_dataset_symbols, load_dataset
+from ml.dataset import (
+    get_pooled_dataset_symbols,
+    load_dataset,
+    load_scanner_latest_rows,
+)
 from ml.inference.api_inference import (
     predict_trade_success_probability,
     scanner_evaluate_symbol,
@@ -198,6 +202,9 @@ class ScannerResponse(BaseModel):
     refresh_elapsed_ms: int
     scan_elapsed_ms: int
     duration_ms: int
+    symbols_per_second: float | None = None
+    avg_symbol_ms: float | None = None
+    skipped_by_reason: dict[str, int] = Field(default_factory=dict)
 
 
 class ScannerRefreshStatusResponse(BaseModel):
@@ -458,7 +465,9 @@ def _is_market_data_fresh_for_symbols(
                     "symbol": sym,
                     "clean_stock_prices_ts": t1.isoformat() if t1 is not None else None,
                     "stock_features_ts": t2.isoformat() if t2 is not None else None,
-                    "stock_features_zscore_ts": t3.isoformat() if t3 is not None else None,
+                    "stock_features_zscore_ts": t3.isoformat()
+                    if t3 is not None
+                    else None,
                     "bottleneck_table": "missing_required_table_row",
                     "bottleneck_timestamp": None,
                     "missing_tables": missing_tables,
@@ -849,27 +858,42 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
 
     top_n = int(body.top_n)
     min_p = float(body.min_probability) if body.min_probability is not None else None
-    env_workers = os.environ.get("SCAN_MAX_WORKERS", "4").strip()
+    env_workers = os.environ.get("SCAN_MAX_WORKERS", "8").strip()
     try:
         default_workers = int(env_workers)
     except ValueError:
         default_workers = 4
-    workers = max(1, min(len(symbols), int(body.max_workers or default_workers)))
+    cpu_cap = (os.cpu_count() or 4) * 2
+    workers = max(
+        1, min(len(symbols), int(body.max_workers or default_workers), cpu_cap)
+    )
     threshold_used = float(app.state.best_threshold)
 
     scan_start = time.perf_counter()
     scored: list[ScannerRow] = []
     errors: list[ScannerErrorRow] = []
     skipped_missing: list[ScannerSkippedRow] = []
+    skipped_by_reason: dict[str, int] = {}
     last_close = _last_market_close_utc()
+    preload_start = time.perf_counter()
+    preloaded_rows = load_scanner_latest_rows(symbols, quiet=True)
+    preload_ms = int((time.perf_counter() - preload_start) * 1000)
+    logger.info(
+        "scanner preload: symbols=%d loaded=%d preload_ms=%d",
+        len(symbols),
+        len(preloaded_rows),
+        preload_ms,
+    )
 
     def _evaluate_symbol(sym: str) -> tuple[float | None, str | None]:
+        rows = preloaded_rows.get(sym)
         return scanner_evaluate_symbol(
             sym,
             app.state.model,
             app.state.feature_cols,
             app.state.scaler,
             last_market_close_utc=last_close,
+            preloaded_rows=rows,
             quiet=True,
         )
 
@@ -880,6 +904,15 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
             try:
                 p, skip_reason = fut.result()
                 if skip_reason is not None:
+                    reason_key = (
+                        "stale"
+                        if "stale" in skip_reason
+                        or "missing recent data" in skip_reason
+                        else "missing_or_other"
+                    )
+                    skipped_by_reason[reason_key] = (
+                        skipped_by_reason.get(reason_key, 0) + 1
+                    )
                     skipped_missing.append(
                         ScannerSkippedRow(symbol=sym, reason=skip_reason)
                     )
@@ -909,6 +942,23 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
     top = scored[:top_n]
     scan_elapsed_ms = int((time.perf_counter() - scan_start) * 1000)
     duration_ms = int((time.perf_counter() - started) * 1000)
+    symbols_per_second = (
+        float(len(symbols)) / max((scan_elapsed_ms / 1000.0), 1e-6)
+        if len(symbols)
+        else None
+    )
+    avg_symbol_ms = (
+        (float(scan_elapsed_ms) / float(len(symbols))) if len(symbols) else None
+    )
+    logger.info(
+        "scanner timing: symbols=%d workers=%d scan_elapsed_ms=%d symbols_per_second=%.2f avg_symbol_ms=%.2f preload_ms=%d",
+        len(symbols),
+        workers,
+        scan_elapsed_ms,
+        symbols_per_second or 0.0,
+        avg_symbol_ms or 0.0,
+        preload_ms,
+    )
     return ScannerResponse(
         top=top,
         errors=errors,
@@ -920,6 +970,9 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
         refresh_elapsed_ms=int(refresh.get("elapsed_ms", 0)),
         scan_elapsed_ms=scan_elapsed_ms,
         duration_ms=duration_ms,
+        symbols_per_second=symbols_per_second,
+        avg_symbol_ms=avg_symbol_ms,
+        skipped_by_reason=skipped_by_reason,
     )
 
 

@@ -4,10 +4,30 @@ from database.queries import fetch_features_z
 from ml.features import FEATURE_COLUMNS_MARKET_CONTEXT_Z
 
 
-def attach_market_context(df_z: pd.DataFrame) -> pd.DataFrame:
-    spy = fetch_features_z("SPY").drop_duplicates(subset=["timestamp"])
-    qqq = fetch_features_z("QQQ").drop_duplicates(subset=["timestamp"])
-    vix = fetch_features_z("^VIX").drop_duplicates(subset=["timestamp"])
+def _resolve_context_frames(
+    context_frames: dict[str, pd.DataFrame] | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if context_frames is None:
+        spy = fetch_features_z("SPY")
+        qqq = fetch_features_z("QQQ")
+        vix = fetch_features_z("^VIX")
+    else:
+        spy = context_frames.get("SPY", pd.DataFrame())
+        qqq = context_frames.get("QQQ", pd.DataFrame())
+        vix = context_frames.get("^VIX", pd.DataFrame())
+    return (
+        spy.drop_duplicates(subset=["timestamp"]),
+        qqq.drop_duplicates(subset=["timestamp"]),
+        vix.drop_duplicates(subset=["timestamp"]),
+    )
+
+
+def attach_market_context(
+    df_z: pd.DataFrame,
+    *,
+    context_frames: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    spy, qqq, vix = _resolve_context_frames(context_frames)
     if "symbol" in df_z.columns:
         df_z = df_z.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
     else:

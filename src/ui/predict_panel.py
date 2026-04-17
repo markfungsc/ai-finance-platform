@@ -65,7 +65,9 @@ def render_signal_omission_explainability(
             "(when present on the merged feature row)."
         )
         ind_expl = (
-            ", ".join(indicator_tags) if indicator_tags else "No indicator tags returned."
+            ", ".join(indicator_tags)
+            if indicator_tags
+            else "No indicator tags returned."
         )
         row = {
             "timestamp": latest_bar_timestamp,

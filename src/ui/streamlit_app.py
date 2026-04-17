@@ -170,6 +170,10 @@ def main() -> None:
                 body["min_probability"] = float(min_prob)
 
             status_ph = st.empty()
+            poll_s = float(
+                os.environ.get("SCANNER_STATUS_POLL_SECONDS", "5").strip() or "5"
+            )
+            poll_s = max(1.0, min(30.0, poll_s))
             with st.spinner("Starting refresh job..."):
                 try:
                     _post("/scanner/refresh/start", {}, timeout=20)
@@ -182,7 +186,8 @@ def main() -> None:
                 else:
                     data = None
                     # Poll refresh status, then run scan when ready.
-                    for _ in range(1800):  # ~60 minutes max at 2s polling
+                    refresh_max_polls = int((60 * 60) / poll_s)
+                    for _ in range(refresh_max_polls):
                         s = _get("/scanner/refresh/status", timeout=20)
                         rs = str(s.get("status", "idle"))
                         status_ph.info(
@@ -199,7 +204,8 @@ def main() -> None:
                                     "when data is missing for prediction."
                                 )
                             _post("/scanner/scan/start", body, timeout=20)
-                            for _ in range(3600):  # ~120 minutes max at 2s polling
+                            scan_max_polls = int((120 * 60) / poll_s)
+                            for _ in range(scan_max_polls):
                                 ss = _get("/scanner/scan/status", timeout=20)
                                 scan_status = str(ss.get("status", "idle"))
                                 status_ph.info(
@@ -213,12 +219,12 @@ def main() -> None:
                                 if scan_status == "failed":
                                     st.error(f"Scan failed: {ss.get('error')}")
                                     break
-                                time.sleep(2)
+                                time.sleep(poll_s)
                             break
                         if rs == "failed":
                             st.error(f"Refresh failed: {s.get('error')}")
                             break
-                        time.sleep(2)
+                        time.sleep(poll_s)
 
             if data:
                 m1, m2, m3, m4, m5 = st.columns(5)

@@ -32,8 +32,7 @@ def fetch_sp500_symbols_from_wikipedia(
     sess = session or requests.Session()
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (compatible; ai-finance-platform/1.0; "
-            "+https://github.com/)"
+            "Mozilla/5.0 (compatible; ai-finance-platform/1.0; +https://github.com/)"
         )
     }
     r = sess.get(WIKI_URL, timeout=timeout, headers=headers)

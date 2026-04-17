@@ -26,7 +26,10 @@ def main() -> int:
     if n_exp and n_feat < n_exp:
         missing = list_symbols_missing_stock_features(expected)
         if missing:
-            print("\nSymbols with no stock_features rows (investigate or re-run features):", file=sys.stderr)
+            print(
+                "\nSymbols with no stock_features rows (investigate or re-run features):",
+                file=sys.stderr,
+            )
             for sym in missing:
                 print(f"  - {sym}", file=sys.stderr)
         print(

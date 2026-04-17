@@ -252,6 +252,8 @@ def test_scan_symbols_top_ordering(tmp_path, monkeypatch):
             "get_pooled_dataset_symbols",
             return_value=["AAPL", "MSFT", "NVDA", "TSLA"],
         ), patch.object(
+            api_main, "load_scanner_latest_rows", return_value={}
+        ), patch.object(
             api_main,
             "scanner_evaluate_symbol",
             side_effect=lambda symbol, *args, **kwargs: (probs[symbol], None),
@@ -293,6 +295,8 @@ def test_scan_symbols_partial_errors(tmp_path, monkeypatch):
             api_main,
             "get_pooled_dataset_symbols",
             return_value=["AAPL", "BAD", "MSFT"],
+        ), patch.object(
+            api_main, "load_scanner_latest_rows", return_value={}
         ), patch.object(
             api_main,
             "scanner_evaluate_symbol",
@@ -339,6 +343,8 @@ def test_scan_symbols_skips_missing_data_without_error(tmp_path, monkeypatch):
             api_main,
             "get_pooled_dataset_symbols",
             return_value=["STALE", "OK"],
+        ), patch.object(
+            api_main, "load_scanner_latest_rows", return_value={}
         ), patch.object(
             api_main,
             "scanner_evaluate_symbol",

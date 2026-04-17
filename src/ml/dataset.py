@@ -1,11 +1,15 @@
 from pathlib import Path
 
+import pandas as pd
+
 from constants import MARKET_CONTEXT_SYMBOLS, TRAIN_SYMBOLS
 from database.queries import (
     fetch_features,
     fetch_features_many,
     fetch_features_z,
     fetch_features_z_many,
+    fetch_latest_features_many,
+    fetch_latest_features_z_many,
 )
 from log_config import get_logger
 from ml.helpers.attach_market_context import attach_market_context
@@ -193,3 +197,70 @@ def load_inference_dataset_with_stage_info(symbol: str, quiet: bool = False):
             stage_info["latest_merged_ts"],
         )
     return df_merged.copy(), df_merged, stage_info
+
+
+def load_scanner_latest_rows(
+    symbols: list[str],
+    *,
+    quiet: bool = True,
+) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, dict]]:
+    """
+    Build latest-row scanner inputs for many symbols in a batched path.
+    """
+    norm_symbols = [s.strip().upper() for s in symbols if s and str(s).strip()]
+    if not norm_symbols:
+        return {}
+
+    df_latest = fetch_latest_features_many(norm_symbols)
+    df_z_latest = fetch_latest_features_z_many(norm_symbols)
+    context_frames = {
+        "SPY": fetch_features_z("SPY"),
+        "QQQ": fetch_features_z("QQQ"),
+        "^VIX": fetch_features_z("^VIX"),
+    }
+
+    df_z_context = attach_market_context(df_z_latest, context_frames=context_frames)
+    df_z_context = attach_sentiment_features(df_z_context)
+    df_merged = df_latest.merge(df_z_context, on=["symbol", "timestamp"], how="inner")
+    if "timestamp" in df_merged.columns:
+        df_merged = df_merged.sort_values(["symbol", "timestamp"])
+    df_merged = df_merged.reset_index(drop=True)
+
+    def _latest_per_symbol(frame: pd.DataFrame) -> dict[str, object]:
+        if (
+            frame.empty
+            or "symbol" not in frame.columns
+            or "timestamp" not in frame.columns
+        ):
+            return {}
+        g = frame.groupby("symbol", dropna=False)["timestamp"].max()
+        return {str(k): v for k, v in g.to_dict().items()}
+
+    latest_features = _latest_per_symbol(df_latest)
+    latest_z = _latest_per_symbol(df_z_latest)
+    latest_context = _latest_per_symbol(df_z_context)
+    latest_merged = _latest_per_symbol(df_merged)
+
+    out: dict[str, tuple[pd.DataFrame, pd.DataFrame, dict]] = {}
+    grouped = {
+        str(sym): sub.reset_index(drop=True)
+        for sym, sub in df_merged.groupby("symbol", sort=False)
+    }
+    for sym in norm_symbols:
+        merged_sym = grouped.get(sym, pd.DataFrame())
+        x_sym = merged_sym.copy()
+        stage_info = {
+            "latest_fetch_features_ts": latest_features.get(sym),
+            "latest_fetch_features_z_ts": latest_z.get(sym),
+            "latest_context_ts": latest_context.get(sym),
+            "latest_merged_ts": latest_merged.get(sym),
+        }
+        out[sym] = (x_sym, merged_sym, stage_info)
+
+    if not quiet:
+        logger.info(
+            "Built scanner latest rows in batch: symbols=%d merged_non_empty=%d",
+            len(norm_symbols),
+            sum(1 for _sym, (_x, merged, _st) in out.items() if not merged.empty),
+        )
+    return out

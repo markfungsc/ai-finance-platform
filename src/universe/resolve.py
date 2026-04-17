@@ -36,8 +36,7 @@ def resolve_ingestion_universe() -> tuple[str, list[str]]:
         return mode, sorted(set(sp + ctx))
 
     raise ValueError(
-        "INGESTION_UNIVERSE must be one of: subscriptions, sp500 "
-        f"(got {mode!r})"
+        f"INGESTION_UNIVERSE must be one of: subscriptions, sp500 (got {mode!r})"
     )
 
 

@@ -41,6 +41,27 @@ _FETCH_Z_MANY_SQL = """
     WHERE symbol = ANY(:symbols)
     ORDER BY symbol, timestamp
 """
+_FETCH_LATEST_FEATURES_MANY_SQL = f"""
+    SELECT DISTINCT ON (p.symbol)
+        p.symbol,
+        p.timestamp,
+        p.open,
+        p.high,
+        p.low,
+        p.close,
+        p.volume,
+        {_FEATURE_JOIN_F_SQL}
+    FROM clean_stock_prices p
+    JOIN stock_features f ON p.symbol = f.symbol AND p.timestamp = f.timestamp
+    WHERE p.symbol = ANY(:symbols)
+    ORDER BY p.symbol, p.timestamp DESC
+"""
+_FETCH_LATEST_Z_MANY_SQL = """
+    SELECT DISTINCT ON (symbol) *
+    FROM stock_features_zscore
+    WHERE symbol = ANY(:symbols)
+    ORDER BY symbol, timestamp DESC
+"""
 
 
 def delete_incomplete_stock_feature_rows(symbol: str) -> int:
@@ -301,6 +322,28 @@ def fetch_features(symbol: str):
 
 def fetch_features_z(symbol: str):
     return fetch_features_z_many([symbol], chunk_size=1, max_workers=1, parallel=False)
+
+
+def fetch_latest_features_many(symbols: list[str]) -> pd.DataFrame:
+    """Load latest joined clean prices + stock_features row per symbol."""
+    unique = list(dict.fromkeys(symbols))
+    if not unique:
+        return pd.DataFrame()
+    query = text(_FETCH_LATEST_FEATURES_MANY_SQL)
+    with engine.connect() as conn:
+        out = pd.read_sql(query, conn, params={"symbols": unique})
+    return out.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+
+def fetch_latest_features_z_many(symbols: list[str]) -> pd.DataFrame:
+    """Load latest z-score row per symbol."""
+    unique = list(dict.fromkeys(symbols))
+    if not unique:
+        return pd.DataFrame()
+    query = text(_FETCH_LATEST_Z_MANY_SQL)
+    with engine.connect() as conn:
+        out = pd.read_sql(query, conn, params={"symbols": unique})
+    return out.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
 
 
 def fetch_features_window(symbols: list[str], ts_min, ts_max) -> pd.DataFrame:

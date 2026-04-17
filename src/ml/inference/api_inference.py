@@ -70,6 +70,7 @@ def scanner_evaluate_symbol(
     scaler,
     *,
     last_market_close_utc: pd.Timestamp,
+    preloaded_rows: tuple[pd.DataFrame, pd.DataFrame, dict] | None = None,
     quiet: bool = True,
 ) -> tuple[float | None, str | None]:
     """
@@ -93,7 +94,14 @@ def scanner_evaluate_symbol(
         lc_in.isoformat(),
     )
 
-    X, df_merged, stage_info = load_inference_dataset_with_stage_info(symbol, quiet=quiet)
+    t_fetch0 = pd.Timestamp.now(tz="UTC")
+    if preloaded_rows is None:
+        X, df_merged, stage_info = load_inference_dataset_with_stage_info(
+            symbol, quiet=quiet
+        )
+    else:
+        X, df_merged, stage_info = preloaded_rows
+    t_fetch_ms = int((pd.Timestamp.now(tz="UTC") - t_fetch0).total_seconds() * 1000)
     if X.empty:
         logger.info(
             "[scanner_evaluate] skip symbol=%s reason=no_rows X_empty=True",
@@ -129,6 +137,11 @@ def scanner_evaluate_symbol(
         stage_info.get("latest_fetch_features_z_ts"),
         stage_info.get("latest_context_ts"),
         stage_info.get("latest_merged_ts"),
+    )
+    logger.debug(
+        "[scanner_evaluate] data_ready symbol=%s fetch_prepare_ms=%d",
+        symbol,
+        t_fetch_ms,
     )
     if not iloc_matches_max:
         logger.warning(
@@ -228,11 +241,14 @@ def scanner_evaluate_symbol(
     else:
         X_model = X_aligned
 
+    t_model0 = pd.Timestamp.now(tz="UTC")
     p = _probability_from_model(model, X_model)
+    t_model_ms = int((pd.Timestamp.now(tz="UTC") - t_model0).total_seconds() * 1000)
     logger.debug(
-        "[scanner_evaluate] ok symbol=%s p=%.6f score_row_ts=%s",
+        "[scanner_evaluate] ok symbol=%s p=%.6f score_row_ts=%s model_ms=%d",
         symbol,
         p,
         latest_ts.isoformat(),
+        t_model_ms,
     )
     return float(p), None
