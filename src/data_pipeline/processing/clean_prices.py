@@ -4,6 +4,8 @@ from sqlalchemy.orm import sessionmaker
 from database.connection import engine
 from database.queries import get_all_symbols_from_raw_stock_prices
 
+Session = sessionmaker(bind=engine)
+
 # Indices / proxies where volume is zero or missing; OHLC still valid.
 _SYMBOLS_VOLUME_NOT_REQUIRED = frozenset({"^VIX"})
 
@@ -34,7 +36,12 @@ def clean_prices(session, symbol: str):
         SELECT symbol, timestamp, open, high, low, close, volume
         FROM raw_stock_prices
         WHERE symbol = :symbol
-        ON CONFLICT (symbol, timestamp) DO NOTHING
+        ON CONFLICT (symbol, timestamp) DO UPDATE SET
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            volume = EXCLUDED.volume
     """),
         {"symbol": symbol},
     )
@@ -92,9 +99,16 @@ def clean_prices(session, symbol: str):
     print(f"[CLEAN] {symbol} | before: {count_before} rows, after: {count_after} rows")
 
 
-if __name__ == "__main__":
-    Session = sessionmaker(bind=engine)
+def run_clean_prices(symbols: list[str]) -> None:
+    """Run :func:`clean_prices` for each symbol (same lifecycle as :func:`run_ingestion`)."""
+    print("[START] clean_prices")
     with Session() as session:
-        symbols = get_all_symbols_from_raw_stock_prices(session)
         for symbol in symbols:
             clean_prices(session, symbol)
+    print("[DONE] clean_prices")
+
+
+if __name__ == "__main__":
+    with Session() as session:
+        syms = get_all_symbols_from_raw_stock_prices(session)
+    run_clean_prices(syms)

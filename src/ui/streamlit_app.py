@@ -190,6 +190,14 @@ def main() -> None:
                             f"{rs} | elapsed_ms={int(s.get('elapsed_ms', 0))}"
                         )
                         if rs in {"succeeded", "skipped_up_to_date"}:
+                            stale_syms = s.get("stale_symbols") or []
+                            if stale_syms:
+                                st.warning(
+                                    "Refresh completed but market data is still stale for: "
+                                    + ", ".join(str(x) for x in stale_syms)
+                                    + ". Those symbols are excluded from scanner ranking "
+                                    "when data is missing for prediction."
+                                )
                             _post("/scanner/scan/start", body, timeout=20)
                             for _ in range(3600):  # ~120 minutes max at 2s polling
                                 ss = _get("/scanner/scan/status", timeout=20)
@@ -213,11 +221,15 @@ def main() -> None:
                         time.sleep(2)
 
             if data:
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Evaluated", int(data.get("evaluated_count", 0)))
                 m2.metric("Errors", int(data.get("error_count", 0)))
-                m3.metric("Refresh status", str(data.get("refresh_status", "unknown")))
-                m4.metric("Elapsed (ms)", int(data.get("duration_ms", 0)))
+                m3.metric(
+                    "Skipped (missing data)",
+                    int(data.get("skipped_missing_data_count", 0)),
+                )
+                m4.metric("Refresh status", str(data.get("refresh_status", "unknown")))
+                m5.metric("Elapsed (ms)", int(data.get("duration_ms", 0)))
 
                 top_df = pd.DataFrame(data.get("top") or [])
                 if top_df.empty:
@@ -231,6 +243,14 @@ def main() -> None:
                         file_name="scanner_top.csv",
                         mime="text/csv",
                     )
+
+                skip_df = pd.DataFrame(data.get("skipped_missing_data") or [])
+                if not skip_df.empty:
+                    st.info(
+                        "The following symbols were not scored and are excluded from the "
+                        "scanner ranking due to missing or stale market/feature data."
+                    )
+                    st.dataframe(skip_df, width="stretch", height=200)
 
                 err_df = pd.DataFrame(data.get("errors") or [])
                 if not err_df.empty:

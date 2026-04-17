@@ -11,10 +11,25 @@ from universe.resolve import resolve_ingestion_symbols
 Session = sessionmaker(bind=engine)
 
 
-def run_ingestion(symbols: list[str], batch_size: int = 500):
-    print("[START] ingestion")
+def run_ingestion(
+    symbols: list[str],
+    batch_size: int = 500,
+    *,
+    backfill: bool = False,
+    BACKFILL: bool | None = None,
+):
+    """Ingest Yahoo prices into ``raw_stock_prices``.
+
+    Use ``backfill=True`` or ``BACKFILL=True`` (same meaning). Keyword-only after ``batch_size``.
+
+    - **Backfill:** full history per symbol (``period=max`` in ``fetch_stock_price``).
+    - **Incremental:** from the day after ``MAX(timestamp)`` in ``raw_stock_prices`` per symbol.
+    """
+    use_backfill = BACKFILL if BACKFILL is not None else backfill
+    mode = "BACKFILL" if use_backfill else "incremental"
+    print(f"[START] ingestion ({mode})")
     with Session() as session:
-        stream = record_stream(symbols, session)
+        stream = record_stream(symbols, session, backfill=use_backfill)
 
         for batch in batch_iterator(stream, batch_size):
             print(f"[BATCH] size={len(batch)}")

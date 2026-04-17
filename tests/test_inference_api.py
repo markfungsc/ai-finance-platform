@@ -253,8 +253,8 @@ def test_scan_symbols_top_ordering(tmp_path, monkeypatch):
             return_value=["AAPL", "MSFT", "NVDA", "TSLA"],
         ), patch.object(
             api_main,
-            "predict_trade_success_probability",
-            side_effect=lambda symbol, *args, **kwargs: probs[symbol],
+            "scanner_evaluate_symbol",
+            side_effect=lambda symbol, *args, **kwargs: (probs[symbol], None),
         ):
             r = client.post("/scan_symbols", json={"top_n": 2})
 
@@ -282,7 +282,7 @@ def test_scan_symbols_partial_errors(tmp_path, monkeypatch):
     def _predict(symbol, *_args, **_kwargs):
         if symbol == "BAD":
             raise ValueError("no rows")
-        return {"AAPL": 0.61, "MSFT": 0.59}[symbol]
+        return {"AAPL": 0.61, "MSFT": 0.59}[symbol], None
 
     with TestClient(api_main.app) as client:
         with patch.object(
@@ -295,7 +295,7 @@ def test_scan_symbols_partial_errors(tmp_path, monkeypatch):
             return_value=["AAPL", "BAD", "MSFT"],
         ), patch.object(
             api_main,
-            "predict_trade_success_probability",
+            "scanner_evaluate_symbol",
             side_effect=_predict,
         ):
             r = client.post("/scan_symbols", json={"top_n": 5})
@@ -306,6 +306,80 @@ def test_scan_symbols_partial_errors(tmp_path, monkeypatch):
     assert payload["error_count"] == 1
     assert [row["symbol"] for row in payload["top"]] == ["AAPL", "MSFT"]
     assert payload["errors"][0]["symbol"] == "BAD"
+
+
+def test_scan_symbols_skips_missing_data_without_error(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    def _eval(symbol, *_args, **_kwargs):
+        if symbol == "STALE":
+            return None, (
+                "latest feature bar date 2026-03-20 is before last market session date "
+                "2026-04-13 (missing recent data). Symbol excluded from scanner ranking."
+            )
+        return 0.82, None
+
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main,
+            "_refresh_snapshot",
+            return_value={"status": "succeeded", "elapsed_ms": 1},
+        ), patch.object(
+            api_main,
+            "get_pooled_dataset_symbols",
+            return_value=["STALE", "OK"],
+        ), patch.object(
+            api_main,
+            "scanner_evaluate_symbol",
+            side_effect=_eval,
+        ):
+            r = client.post("/scan_symbols", json={"top_n": 5})
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["error_count"] == 0
+    assert payload["skipped_missing_data_count"] == 1
+    assert payload["skipped_missing_data"][0]["symbol"] == "STALE"
+    assert "excluded" in payload["skipped_missing_data"][0]["reason"]
+    assert [row["symbol"] for row in payload["top"]] == ["OK"]
+
+
+@patch("ml.inference.api_inference.load_dataset")
+def test_scanner_evaluate_symbol_skips_when_latest_bar_stale(mock_load):
+    last_close = pd.Timestamp("2026-04-13T21:00:00Z")
+    X = pd.DataFrame({"a": [1.0], "b": [2.0]})
+    df_merged = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-03-20T04:00:00Z")],
+            "symbol": ["X"],
+        }
+    )
+    mock_load.return_value = (X, pd.Series([0]), df_merged)
+    from ml.inference.api_inference import scanner_evaluate_symbol
+
+    p, skip = scanner_evaluate_symbol(
+        "X",
+        _ProbaModel(),
+        ["a", "b"],
+        None,
+        last_market_close_utc=last_close,
+        quiet=True,
+    )
+    assert p is None
+    assert skip is not None
+    assert "2026-03-20" in skip
+    assert "2026-04-13" in skip
 
 
 def test_is_market_data_fresh_for_symbols_all_symbols_current():
@@ -387,6 +461,36 @@ def test_scanner_refresh_status_skip_when_fresh(tmp_path, monkeypatch):
     assert s.json()["status"] == "skipped_up_to_date"
 
 
+def test_refresh_worker_succeeds_and_records_stale_symbols(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+
+    last_close = pd.Timestamp("2026-04-10T21:00:00+00:00")
+    with patch.object(
+        api_main,
+        "_run_refresh_pipeline_for_symbols",
+    ), patch.object(
+        api_main,
+        "_is_market_data_fresh_for_symbols",
+        return_value=(False, None, last_close, ["AAPL", "META"]),
+    ):
+        api_main._refresh_worker(["MSFT"])
+
+    snap = api_main._refresh_snapshot()
+    assert snap["status"] == "succeeded"
+    assert snap["error"] is None
+    assert snap["stale_symbols"] == ["AAPL", "META"]
+
+
 def test_scan_symbols_blocked_when_refresh_failed(tmp_path, monkeypatch):
     model_path = tmp_path / "m.pkl"
     feat_path = tmp_path / "f.pkl"
@@ -446,6 +550,8 @@ def test_scanner_scan_job_lifecycle_success(tmp_path, monkeypatch):
             }
         ],
         "errors": [],
+        "skipped_missing_data": [],
+        "skipped_missing_data_count": 0,
         "evaluated_count": 4,
         "error_count": 0,
         "refresh_status": "succeeded",

@@ -48,7 +48,12 @@ def upsert_batch(records: list[dict]):
         INSERT INTO raw_stock_prices (symbol, timestamp, open, high, low, close, volume)
         VALUES (:symbol, :timestamp, :open, :high, :low, :close, :volume)
 
-        ON CONFLICT (symbol, timestamp) DO NOTHING
+        ON CONFLICT (symbol, timestamp) DO UPDATE SET
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            volume = EXCLUDED.volume
     """)
     with engine.begin() as conn:
         conn.execute(insert_query, records)

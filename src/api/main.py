@@ -33,7 +33,10 @@ from ml.analysis.explanations import (
     top_feature_magnitudes,
 )
 from ml.dataset import get_pooled_dataset_symbols, load_dataset
-from ml.inference.api_inference import predict_trade_success_probability
+from ml.inference.api_inference import (
+    predict_trade_success_probability,
+    scanner_evaluate_symbol,
+)
 from ml.models.save_loads import load_feature_columns, load_model, load_scaler
 from ui.backtest_tab import load_backtest_csv
 from universe.resolve import resolve_ingestion_symbols
@@ -63,6 +66,7 @@ _refresh_state: dict[str, object | None] = {
     "error": None,
     "latest_common_timestamp": None,
     "last_market_close_utc": None,
+    "stale_symbols": None,
 }
 _scan_lock = Lock()
 _scan_thread: Thread | None = None
@@ -171,9 +175,16 @@ class ScannerErrorRow(BaseModel):
     error: str
 
 
+class ScannerSkippedRow(BaseModel):
+    symbol: str
+    reason: str
+
+
 class ScannerResponse(BaseModel):
     top: list[ScannerRow]
     errors: list[ScannerErrorRow]
+    skipped_missing_data: list[ScannerSkippedRow] = Field(default_factory=list)
+    skipped_missing_data_count: int = 0
     evaluated_count: int
     error_count: int
     refresh_status: str
@@ -190,6 +201,7 @@ class ScannerRefreshStatusResponse(BaseModel):
     error: str | None = None
     latest_common_timestamp: str | None = None
     last_market_close_utc: str | None = None
+    stale_symbols: list[str] | None = None
 
 
 class ScannerScanStatusResponse(BaseModel):
@@ -476,10 +488,11 @@ def _refresh_worker(symbols: list[str]) -> None:
             symbols
         )
         if not fresh_after:
-            raise RuntimeError(
-                "refresh completed but data is still stale "
-                f"(latest_common={latest_after}, last_close={close_after}, "
-                f"stale_count={len(stale_after)}, stale_sample={stale_after[:20]})"
+            logger.warning(
+                "refresh pipeline finished but market data still stale for %d symbol(s) "
+                "(sample): %s — refresh marked succeeded; scanner will skip unusable symbols",
+                len(stale_after),
+                stale_after[:20],
             )
         _refresh_update(
             status="succeeded",
@@ -490,6 +503,7 @@ def _refresh_worker(symbols: list[str]) -> None:
             if latest_after is not None
             else None,
             last_market_close_utc=close_after.isoformat(),
+            stale_symbols=list(stale_after) if stale_after else None,
         )
     except Exception as e:
         _refresh_update(
@@ -497,6 +511,7 @@ def _refresh_worker(symbols: list[str]) -> None:
             finished_at=pd.Timestamp.now(tz="UTC").isoformat(),
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
             error=str(e),
+            stale_symbols=None,
         )
         logger.exception("scanner refresh job failed")
     finally:
@@ -673,6 +688,7 @@ def scanner_refresh_start():
             if latest_common is not None
             else None,
             last_market_close_utc=last_close.isoformat(),
+            stale_symbols=None,
         )
         return ScannerRefreshStatusResponse(**_refresh_snapshot())
 
@@ -686,6 +702,7 @@ def scanner_refresh_start():
         if latest_common is not None
         else None,
         last_market_close_utc=last_close.isoformat(),
+        stale_symbols=None,
     )
     _refresh_thread = Thread(target=_refresh_worker, args=(symbols,), daemon=True)
     _refresh_thread.start()
@@ -716,6 +733,8 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
         return ScannerResponse(
             top=[],
             errors=[],
+            skipped_missing_data=[],
+            skipped_missing_data_count=0,
             evaluated_count=0,
             error_count=0,
             refresh_status=refresh_status,
@@ -737,24 +756,36 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
     scan_start = time.perf_counter()
     scored: list[ScannerRow] = []
     errors: list[ScannerErrorRow] = []
+    skipped_missing: list[ScannerSkippedRow] = []
+    last_close = _last_market_close_utc()
 
-    def _score_symbol(sym: str) -> float:
-        return float(
-            predict_trade_success_probability(
-                sym,
-                app.state.model,
-                app.state.feature_cols,
-                app.state.scaler,
-                quiet=True,
-            )
+    def _evaluate_symbol(sym: str) -> tuple[float | None, str | None]:
+        return scanner_evaluate_symbol(
+            sym,
+            app.state.model,
+            app.state.feature_cols,
+            app.state.scaler,
+            last_market_close_utc=last_close,
+            quiet=True,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_score_symbol, sym): sym for sym in symbols}
+        futures = {ex.submit(_evaluate_symbol, sym): sym for sym in symbols}
         for fut in as_completed(futures):
             sym = futures[fut]
             try:
-                p = float(fut.result())
+                p, skip_reason = fut.result()
+                if skip_reason is not None:
+                    skipped_missing.append(
+                        ScannerSkippedRow(symbol=sym, reason=skip_reason)
+                    )
+                    logger.info(
+                        "scanner: symbol=%s not scored — excluded from ranking (%s)",
+                        sym,
+                        skip_reason,
+                    )
+                    continue
+                assert p is not None
                 if min_p is not None and p < min_p:
                     continue
                 scored.append(
@@ -777,6 +808,8 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
     return ScannerResponse(
         top=top,
         errors=errors,
+        skipped_missing_data=skipped_missing,
+        skipped_missing_data_count=len(skipped_missing),
         evaluated_count=len(symbols),
         error_count=len(errors),
         refresh_status=refresh_status,
