@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from log_config import get_logger
-from ml.dataset import load_dataset
+from ml.dataset import load_dataset, load_inference_dataset_with_stage_info
 
 logger = get_logger(__name__)
 
@@ -93,7 +93,7 @@ def scanner_evaluate_symbol(
         lc_in.isoformat(),
     )
 
-    X, _y, df_merged = load_dataset(symbol, debug_merge=False, quiet=quiet)
+    X, df_merged, stage_info = load_inference_dataset_with_stage_info(symbol, quiet=quiet)
     if X.empty:
         logger.info(
             "[scanner_evaluate] skip symbol=%s reason=no_rows X_empty=True",
@@ -120,6 +120,15 @@ def scanner_evaluate_symbol(
         ts_max.isoformat(),
         ts_iloc_last.isoformat(),
         iloc_matches_max,
+    )
+    logger.debug(
+        "[scanner_evaluate] stage_timestamps symbol=%s fetch_features=%s "
+        "fetch_features_z=%s context=%s merged=%s",
+        symbol,
+        stage_info.get("latest_fetch_features_ts"),
+        stage_info.get("latest_fetch_features_z_ts"),
+        stage_info.get("latest_context_ts"),
+        stage_info.get("latest_merged_ts"),
     )
     if not iloc_matches_max:
         logger.warning(
@@ -174,16 +183,41 @@ def scanner_evaluate_symbol(
         ts_max_day,
     )
     if latest_day < close_day:
+        latest_features_ts = stage_info.get("latest_fetch_features_ts")
+        latest_z_ts = stage_info.get("latest_fetch_features_z_ts")
+        latest_features_day = (
+            _ts_to_utc(latest_features_ts).normalize().date()
+            if latest_features_ts is not None
+            else None
+        )
+        latest_z_day = (
+            _ts_to_utc(latest_z_ts).normalize().date()
+            if latest_z_ts is not None
+            else None
+        )
+        context_lag_only = (
+            latest_features_day is not None
+            and latest_z_day is not None
+            and latest_features_day >= close_day
+            and latest_z_day >= close_day
+        )
         logger.info(
             "[scanner_evaluate] skip symbol=%s reason=stale latest_day=%s close_day=%s "
-            "latest_ts=%s merged_ts_max=%s ts_max_day=%s",
+            "latest_ts=%s merged_ts_max=%s ts_max_day=%s context_lag_only=%s",
             symbol,
             latest_day,
             close_day,
             latest_ts.isoformat(),
             pd.Timestamp(ts_max).isoformat(),
             ts_max_day,
+            context_lag_only,
         )
+        if context_lag_only:
+            return None, (
+                "latest symbol market/features are current but required market-context "
+                f"features are missing for last market session date {close_day}. "
+                "Symbol excluded from scanner ranking."
+            )
         return None, (
             f"latest feature bar date {latest_day} is before last market session date {close_day} "
             "(missing recent data). Symbol excluded from scanner ranking."

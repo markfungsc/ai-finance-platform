@@ -15,7 +15,7 @@ def _sp500_path() -> Path:
     return Path(raw).expanduser()
 
 
-def resolve_ingestion_symbols() -> list[str]:
+def resolve_ingestion_universe() -> tuple[str, list[str]]:
     """
     ``INGESTION_UNIVERSE`` (default ``subscriptions``):
 
@@ -25,17 +25,22 @@ def resolve_ingestion_symbols() -> list[str]:
       (QQQ, SPY, ^VIX) for downstream training context. Megacap names in
       ``SUBSCRIPTIONS`` are already constituents; no separate union mode.
     """
-    mode = os.environ.get("INGESTION_UNIVERSE", "subscriptions").strip().lower()
+    mode = os.environ.get("INGESTION_UNIVERSE", "sp500").strip().lower()
     ctx = sorted(MARKET_CONTEXT_SYMBOLS)
 
     if mode == "subscriptions":
-        return sorted(SUBSCRIPTIONS)
+        return mode, sorted(SUBSCRIPTIONS)
 
     if mode == "sp500":
         sp = read_symbol_file(_sp500_path())
-        return sorted(set(sp + ctx))
+        return mode, sorted(set(sp + ctx))
 
     raise ValueError(
         "INGESTION_UNIVERSE must be one of: subscriptions, sp500 "
         f"(got {mode!r})"
     )
+
+
+def resolve_ingestion_symbols() -> list[str]:
+    _mode, symbols = resolve_ingestion_universe()
+    return symbols

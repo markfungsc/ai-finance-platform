@@ -26,6 +26,7 @@ from data_pipeline.processing.clean_prices import clean_prices
 from database.connection import engine
 from database.queries import fetch_features, fetch_features_window
 from log_config import get_logger
+from market.calendar import last_completed_xnys_close_utc
 from ml.analysis.explanations import (
     global_feature_importance,
     indicator_context_tags,
@@ -39,7 +40,7 @@ from ml.inference.api_inference import (
 )
 from ml.models.save_loads import load_feature_columns, load_model, load_scaler
 from ui.backtest_tab import load_backtest_csv
-from universe.resolve import resolve_ingestion_symbols
+from universe.resolve import resolve_ingestion_universe
 
 logger = get_logger(__name__)
 Session = sessionmaker(bind=engine)
@@ -67,6 +68,12 @@ _refresh_state: dict[str, object | None] = {
     "latest_common_timestamp": None,
     "last_market_close_utc": None,
     "stale_symbols": None,
+    "stale_details": None,
+    "universe_mode": None,
+    "universe_symbol_count": 0,
+    "universe_symbol_sample": None,
+    "scanner_symbol_overlap_count": None,
+    "scanner_symbol_overlap_ratio": None,
 }
 _scan_lock = Lock()
 _scan_thread: Thread | None = None
@@ -202,6 +209,12 @@ class ScannerRefreshStatusResponse(BaseModel):
     latest_common_timestamp: str | None = None
     last_market_close_utc: str | None = None
     stale_symbols: list[str] | None = None
+    stale_details: list[dict] | None = None
+    universe_mode: str | None = None
+    universe_symbol_count: int = 0
+    universe_symbol_sample: list[str] | None = None
+    scanner_symbol_overlap_count: int | None = None
+    scanner_symbol_overlap_ratio: float | None = None
 
 
 class ScannerScanStatusResponse(BaseModel):
@@ -382,6 +395,10 @@ def _max_timestamp_per_symbol(table_name: str) -> dict[str, pd.Timestamp]:
 
 def _last_market_close_utc(now_utc: pd.Timestamp | None = None) -> pd.Timestamp:
     now = now_utc or pd.Timestamp.now(tz="UTC")
+    from_calendar = last_completed_xnys_close_utc(now)
+    if from_calendar is not None:
+        return from_calendar
+
     close_hour_raw = os.environ.get("MARKET_CLOSE_UTC_HOUR", "21").strip()
     try:
         close_hour = int(close_hour_raw)
@@ -402,7 +419,7 @@ def _last_market_close_utc(now_utc: pd.Timestamp | None = None) -> pd.Timestamp:
 
 def _is_market_data_fresh_for_symbols(
     symbols: list[str],
-) -> tuple[bool, pd.Timestamp | None, pd.Timestamp, list[str]]:
+) -> tuple[bool, pd.Timestamp | None, pd.Timestamp, list[str], list[dict]]:
     """True iff every expected symbol has clean + features + z rows through ``last_close``.
 
     Uses per-symbol ``min(ts_clean, ts_feat, ts_feat_z) >= last_close`` so one lagging
@@ -410,28 +427,67 @@ def _is_market_data_fresh_for_symbols(
     """
     last_close = _last_market_close_utc()
     if not symbols:
-        return False, None, last_close, []
+        return False, None, last_close, [], []
 
     norm = [s.strip().upper() for s in symbols if s and str(s).strip()]
     if not norm:
-        return False, None, last_close, []
+        return False, None, last_close, [], []
 
     d_clean = _max_timestamp_per_symbol("clean_stock_prices")
     d_feat = _max_timestamp_per_symbol("stock_features")
     d_z = _max_timestamp_per_symbol("stock_features_zscore")
 
+    close_day = last_close.normalize().date()
     stale: list[str] = []
     per_symbol_floor: list[pd.Timestamp] = []
+    stale_details: list[dict] = []
     for sym in norm:
         t1 = d_clean.get(sym)
         t2 = d_feat.get(sym)
         t3 = d_z.get(sym)
+        ts_by_table = {
+            "clean_stock_prices": t1,
+            "stock_features": t2,
+            "stock_features_zscore": t3,
+        }
+        missing_tables = [k for k, v in ts_by_table.items() if v is None]
         if t1 is None or t2 is None or t3 is None:
             stale.append(sym)
+            stale_details.append(
+                {
+                    "symbol": sym,
+                    "clean_stock_prices_ts": t1.isoformat() if t1 is not None else None,
+                    "stock_features_ts": t2.isoformat() if t2 is not None else None,
+                    "stock_features_zscore_ts": t3.isoformat() if t3 is not None else None,
+                    "bottleneck_table": "missing_required_table_row",
+                    "bottleneck_timestamp": None,
+                    "missing_tables": missing_tables,
+                }
+            )
             continue
         floor = min(t1, t2, t3)
-        if floor < last_close:
+        floor_day = floor.normalize().date()
+        if floor_day < close_day:
             stale.append(sym)
+            if floor == t1:
+                bottleneck_table = "clean_stock_prices"
+            elif floor == t2:
+                bottleneck_table = "stock_features"
+            else:
+                bottleneck_table = "stock_features_zscore"
+            stale_details.append(
+                {
+                    "symbol": sym,
+                    "clean_stock_prices_ts": t1.isoformat(),
+                    "stock_features_ts": t2.isoformat(),
+                    "stock_features_zscore_ts": t3.isoformat(),
+                    "bottleneck_table": bottleneck_table,
+                    "bottleneck_timestamp": floor.isoformat(),
+                    "last_market_close_day": str(close_day),
+                    "bottleneck_day": str(floor_day),
+                    "missing_tables": [],
+                }
+            )
             continue
         per_symbol_floor.append(floor)
 
@@ -447,7 +503,7 @@ def _is_market_data_fresh_for_symbols(
             len(norm),
             sample,
         )
-    return fresh, bottleneck, last_close, stale
+    return fresh, bottleneck, last_close, stale, stale_details
 
 
 def _refresh_snapshot() -> dict[str, object | None]:
@@ -484,9 +540,13 @@ def _refresh_worker(symbols: list[str]) -> None:
     t0 = time.perf_counter()
     try:
         _run_refresh_pipeline_for_symbols(symbols)
-        fresh_after, latest_after, close_after, stale_after = _is_market_data_fresh_for_symbols(
-            symbols
-        )
+        (
+            fresh_after,
+            latest_after,
+            close_after,
+            stale_after,
+            stale_details_after,
+        ) = _is_market_data_fresh_for_symbols(symbols)
         if not fresh_after:
             logger.warning(
                 "refresh pipeline finished but market data still stale for %d symbol(s) "
@@ -504,6 +564,7 @@ def _refresh_worker(symbols: list[str]) -> None:
             else None,
             last_market_close_utc=close_after.isoformat(),
             stale_symbols=list(stale_after) if stale_after else None,
+            stale_details=stale_details_after if stale_details_after else None,
         )
     except Exception as e:
         _refresh_update(
@@ -512,6 +573,7 @@ def _refresh_worker(symbols: list[str]) -> None:
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
             error=str(e),
             stale_symbols=None,
+            stale_details=None,
         )
         logger.exception("scanner refresh job failed")
     finally:
@@ -675,8 +737,18 @@ def scanner_refresh_start():
     if snap.get("status") == "running":
         return ScannerRefreshStatusResponse(**snap)
 
-    symbols = resolve_ingestion_symbols()
-    fresh, latest_common, last_close, _stale = _is_market_data_fresh_for_symbols(symbols)
+    universe_mode, symbols = resolve_ingestion_universe()
+    scanner_symbols = get_pooled_dataset_symbols()
+    refresh_set = set(symbols)
+    scanner_set = set(scanner_symbols)
+    overlap_count = len(scanner_set & refresh_set)
+    overlap_ratio = (
+        float(overlap_count) / float(len(scanner_set)) if len(scanner_set) > 0 else None
+    )
+    fresh, latest_common, last_close, _stale, stale_details = (
+        _is_market_data_fresh_for_symbols(symbols)
+    )
+    symbol_sample = symbols[:15]
     if fresh:
         _refresh_update(
             status="skipped_up_to_date",
@@ -689,6 +761,12 @@ def scanner_refresh_start():
             else None,
             last_market_close_utc=last_close.isoformat(),
             stale_symbols=None,
+            stale_details=None,
+            universe_mode=universe_mode,
+            universe_symbol_count=len(symbols),
+            universe_symbol_sample=symbol_sample,
+            scanner_symbol_overlap_count=overlap_count,
+            scanner_symbol_overlap_ratio=overlap_ratio,
         )
         return ScannerRefreshStatusResponse(**_refresh_snapshot())
 
@@ -703,6 +781,12 @@ def scanner_refresh_start():
         else None,
         last_market_close_utc=last_close.isoformat(),
         stale_symbols=None,
+        stale_details=stale_details if stale_details else None,
+        universe_mode=universe_mode,
+        universe_symbol_count=len(symbols),
+        universe_symbol_sample=symbol_sample,
+        scanner_symbol_overlap_count=overlap_count,
+        scanner_symbol_overlap_ratio=overlap_ratio,
     )
     _refresh_thread = Thread(target=_refresh_worker, args=(symbols,), daemon=True)
     _refresh_thread.start()
@@ -742,6 +826,26 @@ def _run_scan_core(body: ScannerRequest) -> ScannerResponse:
             scan_elapsed_ms=0,
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    refresh_symbols = refresh.get("universe_symbol_count")
+    overlap_ratio = refresh.get("scanner_symbol_overlap_ratio")
+    if refresh_symbols is not None and overlap_ratio is not None:
+        try:
+            overlap_ratio_val = float(overlap_ratio)
+        except (TypeError, ValueError):
+            overlap_ratio_val = None
+        if overlap_ratio_val is not None and overlap_ratio_val < 0.95:
+            mode = refresh.get("universe_mode")
+            count = refresh.get("universe_symbol_count")
+            overlap_count = refresh.get("scanner_symbol_overlap_count")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "refresh universe does not cover scanner symbol pool; run refresh "
+                    f"with INGESTION_UNIVERSE=sp500. mode={mode} "
+                    f"refresh_symbols={count} scanner_overlap={overlap_count}/{len(symbols)}"
+                ),
+            )
 
     top_n = int(body.top_n)
     min_p = float(body.min_probability) if body.min_probability is not None else None

@@ -124,3 +124,72 @@ def load_dataset(symbol: str, debug_merge: bool = False, quiet: bool = False):
     )
 
     return X, y, df_merged
+
+
+def load_inference_dataset(symbol: str, quiet: bool = False):
+    """
+    Load latest merged model-input rows for inference/scanner usage.
+
+    Unlike ``load_dataset()``, this path does not generate trade labels, so trailing
+    rows are preserved and freshness checks can use the real latest feature bar.
+    """
+    df = fetch_features(symbol)  # contains high/low/close
+    df_z = fetch_features_z(symbol)  # z-score features
+    if not quiet:
+        logger.info(
+            "Loaded %d rows for %s inference z-scores; df columns: %s",
+            len(df_z),
+            symbol,
+            list(df.columns),
+        )
+
+    df_z_context = attach_market_context(df_z)
+    df_z_context = attach_sentiment_features(df_z_context)
+    if not quiet:
+        logger.info(
+            "Loaded %d rows for %s inference market context",
+            len(df_z_context),
+            symbol,
+        )
+
+    df_merged = df.merge(df_z_context, on=["symbol", "timestamp"], how="inner")
+    if "timestamp" in df_merged.columns:
+        df_merged = df_merged.sort_values("timestamp")
+    df_merged = df_merged.reset_index(drop=True)
+    return df_merged.copy(), df_merged
+
+
+def load_inference_dataset_with_stage_info(symbol: str, quiet: bool = False):
+    """
+    Load inference rows and timestamp diagnostics for each merge stage.
+    """
+    df = fetch_features(symbol)
+    df_z = fetch_features_z(symbol)
+    df_z_context = attach_market_context(df_z)
+    df_z_context = attach_sentiment_features(df_z_context)
+    df_merged = df.merge(df_z_context, on=["symbol", "timestamp"], how="inner")
+    if "timestamp" in df_merged.columns:
+        df_merged = df_merged.sort_values("timestamp")
+    df_merged = df_merged.reset_index(drop=True)
+
+    def _latest(frame):
+        if frame.empty or "timestamp" not in frame.columns:
+            return None
+        return frame["timestamp"].max()
+
+    stage_info = {
+        "latest_fetch_features_ts": _latest(df),
+        "latest_fetch_features_z_ts": _latest(df_z),
+        "latest_context_ts": _latest(df_z_context),
+        "latest_merged_ts": _latest(df_merged),
+    }
+    if not quiet:
+        logger.info(
+            "Inference stage timestamps for %s: features=%s z=%s context=%s merged=%s",
+            symbol,
+            stage_info["latest_fetch_features_ts"],
+            stage_info["latest_fetch_features_z_ts"],
+            stage_info["latest_context_ts"],
+            stage_info["latest_merged_ts"],
+        )
+    return df_merged.copy(), df_merged, stage_info

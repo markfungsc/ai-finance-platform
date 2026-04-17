@@ -355,7 +355,7 @@ def test_scan_symbols_skips_missing_data_without_error(tmp_path, monkeypatch):
     assert [row["symbol"] for row in payload["top"]] == ["OK"]
 
 
-@patch("ml.inference.api_inference.load_dataset")
+@patch("ml.inference.api_inference.load_inference_dataset_with_stage_info")
 def test_scanner_evaluate_symbol_skips_when_latest_bar_stale(mock_load):
     last_close = pd.Timestamp("2026-04-13T21:00:00Z")
     X = pd.DataFrame({"a": [1.0], "b": [2.0]})
@@ -365,7 +365,16 @@ def test_scanner_evaluate_symbol_skips_when_latest_bar_stale(mock_load):
             "symbol": ["X"],
         }
     )
-    mock_load.return_value = (X, pd.Series([0]), df_merged)
+    mock_load.return_value = (
+        X,
+        df_merged,
+        {
+            "latest_fetch_features_ts": pd.Timestamp("2026-03-20T04:00:00Z"),
+            "latest_fetch_features_z_ts": pd.Timestamp("2026-03-20T04:00:00Z"),
+            "latest_context_ts": pd.Timestamp("2026-03-20T04:00:00Z"),
+            "latest_merged_ts": pd.Timestamp("2026-03-20T04:00:00Z"),
+        },
+    )
     from ml.inference.api_inference import scanner_evaluate_symbol
 
     p, skip = scanner_evaluate_symbol(
@@ -382,6 +391,79 @@ def test_scanner_evaluate_symbol_skips_when_latest_bar_stale(mock_load):
     assert "2026-04-13" in skip
 
 
+@patch("ml.inference.api_inference.load_inference_dataset_with_stage_info")
+def test_scanner_evaluate_symbol_uses_latest_unlabeled_bar(mock_load):
+    last_close = pd.Timestamp("2026-04-13T21:00:00Z")
+    X = pd.DataFrame({"a": [1.0, 2.0], "b": [2.0, 3.0]})
+    df_merged = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2026-03-20T04:00:00Z"),
+                pd.Timestamp("2026-04-16T04:00:00Z"),
+            ],
+            "symbol": ["X", "X"],
+        }
+    )
+    mock_load.return_value = (
+        X,
+        df_merged,
+        {
+            "latest_fetch_features_ts": pd.Timestamp("2026-04-16T04:00:00Z"),
+            "latest_fetch_features_z_ts": pd.Timestamp("2026-04-16T04:00:00Z"),
+            "latest_context_ts": pd.Timestamp("2026-04-16T04:00:00Z"),
+            "latest_merged_ts": pd.Timestamp("2026-04-16T04:00:00Z"),
+        },
+    )
+    from ml.inference.api_inference import scanner_evaluate_symbol
+
+    p, skip = scanner_evaluate_symbol(
+        "X",
+        _ProbaModel(),
+        ["a", "b"],
+        None,
+        last_market_close_utc=last_close,
+        quiet=True,
+    )
+    assert skip is None
+    assert p is not None
+    assert p == pytest.approx(0.63)
+
+
+@patch("ml.inference.api_inference.load_inference_dataset_with_stage_info")
+def test_scanner_evaluate_symbol_reports_context_gap_when_base_data_current(mock_load):
+    last_close = pd.Timestamp("2026-04-16T21:00:00Z")
+    X = pd.DataFrame({"a": [1.0], "b": [2.0]})
+    df_merged = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-04-08T04:00:00Z")],
+            "symbol": ["X"],
+        }
+    )
+    mock_load.return_value = (
+        X,
+        df_merged,
+        {
+            "latest_fetch_features_ts": pd.Timestamp("2026-04-16T04:00:00Z"),
+            "latest_fetch_features_z_ts": pd.Timestamp("2026-04-16T04:00:00Z"),
+            "latest_context_ts": pd.Timestamp("2026-04-08T04:00:00Z"),
+            "latest_merged_ts": pd.Timestamp("2026-04-08T04:00:00Z"),
+        },
+    )
+    from ml.inference.api_inference import scanner_evaluate_symbol
+
+    p, skip = scanner_evaluate_symbol(
+        "X",
+        _ProbaModel(),
+        ["a", "b"],
+        None,
+        last_market_close_utc=last_close,
+        quiet=True,
+    )
+    assert p is None
+    assert skip is not None
+    assert "market-context" in skip
+
+
 def test_is_market_data_fresh_for_symbols_all_symbols_current():
     import api.main as api_main
 
@@ -396,12 +478,13 @@ def test_is_market_data_fresh_for_symbols_all_symbols_current():
     ), patch.object(
         api_main, "_max_timestamp_per_symbol", side_effect=_same_per_sym
     ):
-        fresh, bottleneck, lc, stale = api_main._is_market_data_fresh_for_symbols(
-            ["AAPL", "MSFT"]
+        fresh, bottleneck, lc, stale, stale_details = (
+            api_main._is_market_data_fresh_for_symbols(["AAPL", "MSFT"])
         )
 
     assert fresh is True
     assert stale == []
+    assert stale_details == []
     assert bottleneck == last_close
     assert lc == last_close
 
@@ -421,14 +504,45 @@ def test_is_market_data_fresh_for_symbols_stale_when_one_symbol_behind():
     ), patch.object(
         api_main, "_max_timestamp_per_symbol", side_effect=_mixed
     ):
-        fresh, bottleneck, lc, stale = api_main._is_market_data_fresh_for_symbols(
-            ["AAPL", "MSFT"]
+        fresh, bottleneck, lc, stale, stale_details = (
+            api_main._is_market_data_fresh_for_symbols(["AAPL", "MSFT"])
         )
 
     assert fresh is False
     assert "MSFT" in stale
+    assert stale_details[0]["bottleneck_table"] in {
+        "clean_stock_prices",
+        "stock_features",
+        "stock_features_zscore",
+    }
     assert bottleneck is None
     assert lc == last_close
+
+
+def test_is_market_data_fresh_for_symbols_allows_same_day_timestamp_offsets():
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    last_close = pd.Timestamp("2026-04-16T20:00:00Z")
+
+    def _offset_per_sym(_table: str) -> dict[str, pd.Timestamp]:
+        return {
+            "AAPL": pd.Timestamp("2026-04-16T04:00:00Z"),
+            "^VIX": pd.Timestamp("2026-04-16T05:15:00Z"),
+        }
+
+    with patch.object(
+        api_main, "_last_market_close_utc", return_value=last_close
+    ), patch.object(
+        api_main, "_max_timestamp_per_symbol", side_effect=_offset_per_sym
+    ):
+        fresh, _bottleneck, _lc, stale, stale_details = (
+            api_main._is_market_data_fresh_for_symbols(["AAPL", "^VIX"])
+        )
+
+    assert fresh is True
+    assert stale == []
+    assert stale_details == []
 
 
 def test_scanner_refresh_status_skip_when_fresh(tmp_path, monkeypatch):
@@ -450,7 +564,11 @@ def test_scanner_refresh_status_skip_when_fresh(tmp_path, monkeypatch):
         with patch.object(
             api_main,
             "_is_market_data_fresh_for_symbols",
-            return_value=(True, now, now, []),
+            return_value=(True, now, now, [], []),
+        ), patch.object(
+            api_main,
+            "resolve_ingestion_universe",
+            return_value=("sp500", ["AAPL", "MSFT", "QQQ"]),
         ):
             r = client.post("/scanner/refresh/start")
             s = client.get("/scanner/refresh/status")
@@ -459,6 +577,23 @@ def test_scanner_refresh_status_skip_when_fresh(tmp_path, monkeypatch):
     assert s.status_code == 200
     assert r.json()["status"] == "skipped_up_to_date"
     assert s.json()["status"] == "skipped_up_to_date"
+    assert s.json()["universe_mode"] == "sp500"
+    assert s.json()["universe_symbol_count"] == 3
+    assert s.json()["scanner_symbol_overlap_count"] is not None
+    assert s.json()["scanner_symbol_overlap_ratio"] is not None
+
+
+def test_resolve_ingestion_universe_defaults_to_sp500(monkeypatch):
+    monkeypatch.delenv("INGESTION_UNIVERSE", raising=False)
+    import universe.resolve as uni_resolve
+
+    importlib.reload(uni_resolve)
+    with patch.object(
+        uni_resolve, "read_symbol_file", return_value=["AAPL", "MSFT", "ABT"]
+    ):
+        mode, symbols = uni_resolve.resolve_ingestion_universe()
+    assert mode == "sp500"
+    assert "ABT" in symbols
 
 
 def test_refresh_worker_succeeds_and_records_stale_symbols(tmp_path, monkeypatch):
@@ -481,7 +616,23 @@ def test_refresh_worker_succeeds_and_records_stale_symbols(tmp_path, monkeypatch
     ), patch.object(
         api_main,
         "_is_market_data_fresh_for_symbols",
-        return_value=(False, None, last_close, ["AAPL", "META"]),
+        return_value=(
+            False,
+            None,
+            last_close,
+            ["AAPL", "META"],
+            [
+                {
+                    "symbol": "AAPL",
+                    "clean_stock_prices_ts": "2026-04-10T21:00:00+00:00",
+                    "stock_features_ts": "2026-04-10T21:00:00+00:00",
+                    "stock_features_zscore_ts": "2026-04-09T21:00:00+00:00",
+                    "bottleneck_table": "stock_features_zscore",
+                    "bottleneck_timestamp": "2026-04-09T21:00:00+00:00",
+                    "missing_tables": [],
+                }
+            ],
+        ),
     ):
         api_main._refresh_worker(["MSFT"])
 
@@ -489,6 +640,49 @@ def test_refresh_worker_succeeds_and_records_stale_symbols(tmp_path, monkeypatch
     assert snap["status"] == "succeeded"
     assert snap["error"] is None
     assert snap["stale_symbols"] == ["AAPL", "META"]
+    assert snap["stale_details"][0]["bottleneck_table"] == "stock_features_zscore"
+
+
+def test_last_market_close_uses_calendar_when_available(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    now = pd.Timestamp("2026-07-03T18:00:00Z")
+    expected = pd.Timestamp("2026-07-02T20:00:00Z")
+    with patch.object(
+        api_main, "last_completed_xnys_close_utc", return_value=expected
+    ):
+        got = api_main._last_market_close_utc(now)
+    assert got == expected
+
+
+def test_last_market_close_falls_back_to_heuristic_when_calendar_missing(
+    tmp_path, monkeypatch
+):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+    monkeypatch.setenv("MARKET_CLOSE_UTC_HOUR", "21")
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    now = pd.Timestamp("2026-01-05T22:00:00Z")
+    with patch.object(api_main, "last_completed_xnys_close_utc", return_value=None):
+        got = api_main._last_market_close_utc(now)
+    assert got == pd.Timestamp("2026-01-05T21:00:00Z")
 
 
 def test_scan_symbols_blocked_when_refresh_failed(tmp_path, monkeypatch):
@@ -515,6 +709,43 @@ def test_scan_symbols_blocked_when_refresh_failed(tmp_path, monkeypatch):
 
     assert r.status_code == 503
     assert "refresh failed" in r.json()["detail"]
+
+
+def test_scan_symbols_blocked_when_refresh_universe_mismatch(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main,
+            "_refresh_snapshot",
+            return_value={
+                "status": "succeeded",
+                "elapsed_ms": 1,
+                "universe_mode": "subscriptions",
+                "universe_symbol_count": 10,
+                "scanner_symbol_overlap_count": 8,
+                "scanner_symbol_overlap_ratio": 0.1,
+            },
+        ), patch.object(
+            api_main,
+            "get_pooled_dataset_symbols",
+            return_value=[f"S{i}" for i in range(100)],
+        ):
+            r = client.post("/scan_symbols", json={"top_n": 5})
+
+    assert r.status_code == 503
+    assert "refresh universe does not cover scanner symbol pool" in r.json()["detail"]
 
 
 def test_scanner_scan_job_lifecycle_success(tmp_path, monkeypatch):

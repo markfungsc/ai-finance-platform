@@ -2,6 +2,7 @@ import time
 from datetime import timedelta
 from itertools import islice
 
+import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
@@ -12,15 +13,27 @@ from database.queries import get_latest_timestamp
 
 def fetch_records(symbol: str, session, backfill: bool = False):
     """Fetch dataframe and yield record dicts"""
+    end_date = None
     if backfill:
         start_date = None
     else:
         last_timestamp = get_latest_timestamp(session, symbol)
         if last_timestamp:
-            start_date = (last_timestamp + timedelta(days=1)).strftime("%Y-%m-%d")
+            last_ts = pd.Timestamp(last_timestamp)
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.tz_localize("UTC")
+            else:
+                last_ts = last_ts.tz_convert("UTC")
+            start_dt = last_ts.date() + timedelta(days=1)
+            today_utc = pd.Timestamp.now(tz="UTC").date()
+            if start_dt > today_utc:
+                return
+            start_date = start_dt.isoformat()
+            # yfinance end is exclusive; use tomorrow to include today's session.
+            end_date = (today_utc + timedelta(days=1)).isoformat()
         else:
             start_date = None
-    df = fetch_stock_price(symbol, start_date=start_date)
+    df = fetch_stock_price(symbol, start_date=start_date, end_date=end_date)
 
     for record in df.to_dict(orient="records"):
         yield record
