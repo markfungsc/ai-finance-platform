@@ -188,3 +188,53 @@ class TestLoadDataset:
         assert len(X) == len(y) == len(merged)
         assert len(X) > 0
         mock_attach_context.assert_called_once()
+        mock_fetch_many.assert_called_once_with(
+            ["AAPL", "MSFT"],
+            parallel=False,
+            max_workers=1,
+            end_date=None,
+        )
+        mock_fetch_z_many.assert_called_once_with(
+            ["AAPL", "MSFT"],
+            parallel=False,
+            max_workers=1,
+            end_date=None,
+        )
+
+    @patch("ml.helpers.merge_features.generate_trade_labels")
+    @patch("ml.dataset.attach_market_context")
+    @patch("ml.dataset.fetch_features_z_many")
+    @patch("ml.dataset.fetch_features_many")
+    @patch(
+        "ml.dataset.get_pooled_dataset_symbols",
+        return_value=["AAPL", "MSFT"],
+    )
+    def test_load_train_dataset_passes_end_date_to_fetchers(
+        self,
+        _mock_get_pooled: object,
+        mock_fetch_many: object,
+        mock_fetch_z_many: object,
+        mock_attach_context: object,
+        mock_labels: object,
+    ) -> None:
+        df_aapl = _make_features_df(n=8, symbol="AAPL")
+        z_aapl = _make_z_df(df_aapl["timestamp"], z_marker=10.0, symbol="AAPL")
+        mock_fetch_many.return_value = df_aapl
+        mock_fetch_z_many.return_value = z_aapl
+        mock_attach_context.side_effect = _with_market_context
+        mock_labels.side_effect = lambda d: d.assign(trade_success=d["return_5d"])
+
+        load_train_dataset(end_date="2026-03-27")
+
+        mock_fetch_many.assert_called_once_with(
+            ["AAPL", "MSFT"],
+            parallel=False,
+            max_workers=1,
+            end_date="2026-03-27",
+        )
+        mock_fetch_z_many.assert_called_once_with(
+            ["AAPL", "MSFT"],
+            parallel=False,
+            max_workers=1,
+            end_date="2026-03-27",
+        )

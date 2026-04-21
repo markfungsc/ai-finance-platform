@@ -35,10 +35,33 @@ _FETCH_FEATURES_MANY_SQL = f"""
     WHERE p.symbol = ANY(:symbols)
     ORDER BY p.symbol, p.timestamp
 """
+_FETCH_FEATURES_MANY_SQL_WITH_END_DATE = f"""
+    SELECT
+        p.symbol,
+        p.timestamp,
+        p.open,
+        p.high,
+        p.low,
+        p.close,
+        p.volume,
+        {_FEATURE_JOIN_F_SQL}
+    FROM clean_stock_prices p
+    JOIN stock_features f ON p.symbol = f.symbol AND p.timestamp = f.timestamp
+    WHERE p.symbol = ANY(:symbols)
+      AND p.timestamp <= :end_date
+    ORDER BY p.symbol, p.timestamp
+"""
 _FETCH_Z_MANY_SQL = """
     SELECT *
     FROM stock_features_zscore
     WHERE symbol = ANY(:symbols)
+    ORDER BY symbol, timestamp
+"""
+_FETCH_Z_MANY_SQL_WITH_END_DATE = """
+    SELECT *
+    FROM stock_features_zscore
+    WHERE symbol = ANY(:symbols)
+      AND timestamp <= :end_date
     ORDER BY symbol, timestamp
 """
 _FETCH_LATEST_FEATURES_MANY_SQL = f"""
@@ -250,20 +273,40 @@ def upsert_features_z(records: list[dict]):
             conn.execute(query, batch)
 
 
-def _read_features_chunk(symbols_chunk: list[str]) -> pd.DataFrame:
+def _read_features_chunk(
+    symbols_chunk: list[str],
+    end_date: str | None = None,
+) -> pd.DataFrame:
     if not symbols_chunk:
         return pd.DataFrame()
-    query = text(_FETCH_FEATURES_MANY_SQL)
+    query_sql = (
+        _FETCH_FEATURES_MANY_SQL_WITH_END_DATE
+        if end_date is not None
+        else _FETCH_FEATURES_MANY_SQL
+    )
+    query = text(query_sql)
+    params = {"symbols": list(symbols_chunk)}
+    if end_date is not None:
+        params["end_date"] = end_date
     with engine.connect() as conn:
-        return pd.read_sql(query, conn, params={"symbols": list(symbols_chunk)})
+        return pd.read_sql(query, conn, params=params)
 
 
-def _read_features_z_chunk(symbols_chunk: list[str]) -> pd.DataFrame:
+def _read_features_z_chunk(
+    symbols_chunk: list[str],
+    end_date: str | None = None,
+) -> pd.DataFrame:
     if not symbols_chunk:
         return pd.DataFrame()
-    query = text(_FETCH_Z_MANY_SQL)
+    query_sql = (
+        _FETCH_Z_MANY_SQL_WITH_END_DATE if end_date is not None else _FETCH_Z_MANY_SQL
+    )
+    query = text(query_sql)
+    params = {"symbols": list(symbols_chunk)}
+    if end_date is not None:
+        params["end_date"] = end_date
     with engine.connect() as conn:
-        return pd.read_sql(query, conn, params={"symbols": list(symbols_chunk)})
+        return pd.read_sql(query, conn, params=params)
 
 
 def fetch_features_many(
@@ -272,6 +315,7 @@ def fetch_features_many(
     chunk_size: int = FEATURE_FETCH_SYMBOL_CHUNK,
     max_workers: int = FEATURE_FETCH_MAX_WORKERS,
     parallel: bool = True,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """Load joined clean prices + stock_features for many symbols (batched ANY + optional parallel chunks)."""
     unique = list(dict.fromkeys(symbols))
@@ -279,12 +323,14 @@ def fetch_features_many(
         return pd.DataFrame()
     chunks = [unique[i : i + chunk_size] for i in range(0, len(unique), chunk_size)]
     if not parallel or len(chunks) == 1:
-        frames = [_read_features_chunk(ch) for ch in chunks]
+        frames = [_read_features_chunk(ch, end_date=end_date) for ch in chunks]
     else:
         workers = min(max_workers, len(chunks))
         frames = []
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(_read_features_chunk, ch) for ch in chunks]
+            futures = [
+                ex.submit(_read_features_chunk, ch, end_date=end_date) for ch in chunks
+            ]
             for fut in as_completed(futures):
                 frames.append(fut.result())
     out = pd.concat(frames, ignore_index=True)
@@ -297,6 +343,7 @@ def fetch_features_z_many(
     chunk_size: int = FEATURE_FETCH_SYMBOL_CHUNK,
     max_workers: int = FEATURE_FETCH_MAX_WORKERS,
     parallel: bool = True,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """Load z-score feature rows for many symbols (batched ANY + optional parallel chunks)."""
     unique = list(dict.fromkeys(symbols))
@@ -304,12 +351,15 @@ def fetch_features_z_many(
         return pd.DataFrame()
     chunks = [unique[i : i + chunk_size] for i in range(0, len(unique), chunk_size)]
     if not parallel or len(chunks) == 1:
-        frames = [_read_features_z_chunk(ch) for ch in chunks]
+        frames = [_read_features_z_chunk(ch, end_date=end_date) for ch in chunks]
     else:
         workers = min(max_workers, len(chunks))
         frames = []
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(_read_features_z_chunk, ch) for ch in chunks]
+            futures = [
+                ex.submit(_read_features_z_chunk, ch, end_date=end_date)
+                for ch in chunks
+            ]
             for fut in as_completed(futures):
                 frames.append(fut.result())
     out = pd.concat(frames, ignore_index=True)

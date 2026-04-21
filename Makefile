@@ -64,7 +64,7 @@ backtest:
 	export PYTHONPATH=src && python src/ml/backtest/run_backtest.py
 
 experiments:
-	export PYTHONPATH=src && export THRESHOLD_SELECTION_MODE=multi_top_k && python src/ml/experiments/run_experiment.py
+	export PYTHONPATH=src && export THRESHOLD_SELECTION_MODE=multi_top_k && export EXPERIMENT_END_DATE=$${EXPERIMENT_END_DATE:-2026-03-27} && python src/ml/experiments/run_experiment.py --end-date $${EXPERIMENT_END_DATE}
 
 view-results:
 	export PYTHONPATH=src && python src/ml/experiments/view_results.py

@@ -6,6 +6,8 @@ Multi-layer market analytics platform: curated price data, feature store semanti
 
 The system implements a **medallion-style data architecture** in PostgreSQL—raw ingest, validated analytics-ready tables, and a feature table keyed for downstream ML. Near-term priority is a **thin vertical slice**: baseline model, HTTP inference, and containerized services, then successive releases for experiment tracking, alternative data (sentiment), sequence models, RAG-based research assistants, orchestrated training, and hardened production operations.
 
+Operational runbooks and day-to-day commands live in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 ## Current scope
 
 | Layer | Relation | Function |
@@ -26,13 +28,21 @@ What works end-to-end today (local, Postgres-backed):
 - **Evaluation & backtest:** metrics via [`src/ml/evaluate.py`](src/ml/evaluate.py); `make backtest` and `make walk-forward` exercise [`src/ml/backtest/`](src/ml/backtest/).
 - **Inference (CLI):** `make predict` runs [`src/ml/inference/predict.py`](src/ml/inference/predict.py) (optional merge debug output for inspection).
 - **Inference (HTTP + UI):** FastAPI app [`src/api/main.py`](src/api/main.py); Streamlit dashboard [`src/ui/streamlit_app.py`](src/ui/streamlit_app.py). After `make up`, API is at http://localhost:8000 and the UI at http://localhost:8501 (mounts `models/` and `experiments/` from the host; run `make train` first if you have no artifact). For local dev without Compose, use `make serve-api` and `make streamlit` in separate terminals.
+- **Scanner (HTTP + UI):** Async refresh + scan lifecycle is live (`/scanner/refresh/start|status`, `/scanner/scan/start|status`) with freshness gating, stale/missing-data skips, and universe-overlap guardrails in [`src/api/main.py`](src/api/main.py), surfaced in the Streamlit Scanner tab.
+- **Threshold optimization artifacts:** `make experiments` now persists optimized threshold outputs consumed by API/UI (`*_best_threshold.json`, `*_threshold_grid.json`) and split artifacts under `experiments/artifacts/...` via [`src/ml/experiments/run_experiment.py`](src/ml/experiments/run_experiment.py).
+- **S&P 500 pooled workflow:** Universe bootstrap + preflight coverage and SP500 ingestion/feature targets are operational (`make universe-fetch-sp500`, `make universe-preflight-sp500`, `make ingestion-sp500`, `make features-sp500*`), and pooled experiment symbols load from `data/universe/sp500_symbols.txt` with fallback behavior.
 - **Optional news sentiment:** [`src/ml/sentiment/`](src/ml/sentiment/) — FinBERT scores from durable news sources and leakage-safe as-of attach. Current training/inference sentiment block uses daily symbol + market features (`sym_*_d1`, `spy_*_d1`) with neutral fallback.
 
 - **Tests & lint:** `make test` (pytest), `make lint` / `make fmt` (Ruff).
 
 Not here yet: centralized **model registry**, shared **experiment tracking** (beyond local MLflow runs), and **automated promotion** (see roadmap).
 
+### Delivered since initial plan
 
+- **Stock scanner:** async refresh/scan pipeline, status polling, stale-symbol exclusions, and top-N ranked candidates in API + Streamlit.
+- **Best-threshold lifecycle:** backtest threshold optimization with persisted best threshold + threshold grid artifacts reused by inference and dashboard flows.
+- **SP500 operational path:** automated constituent fetch, SP500 universe preflight checks, and dedicated SP500 ingestion/features targets for pooled workflows.
+- **Experiment date guardrail:** `make experiments` enforces `EXPERIMENT_END_DATE` (default `2026-03-27`) and passes `--end-date` into experiment data loading.
 
 ### News sentiment (optional)
 
@@ -71,8 +81,8 @@ Status: **Delivered** · **In flight** · **Planned**
 | Checkpoint | Objective | Status |
 |------------|------------|--------|
 | **W1** | Core data path + baseline ML artifact | **In flight** — data + features + **local** train / eval / backtest / CLI predict **delivered**; **HTTP API** in Compose **delivered**; **model registry** **planned** |
-| **W2** | Inference API + service packaging | **In flight** — **Compose stack** (Postgres, API, Streamlit UI, Qdrant) **delivered**; hardened CI images and deploy **planned** |
-| **W4** | Experiment tracking & reproducibility | **Planned** — MLflow-class runs, metrics, model lineage |
+| **W2** | Inference API + service packaging | **In flight** — **Compose stack** (Postgres, API, Streamlit UI, Qdrant) **delivered**; scanner endpoints + Streamlit scanner tab **delivered**; hardened CI images and deploy **planned** |
+| **W4** | Experiment tracking & reproducibility | **In flight** — experiment runs, persisted threshold/grid artifacts, split-level backtest artifacts, and local MLflow logging **delivered**; shared tracking backend/lineage governance **planned** |
 | **W6** | Transformer-based financial sentiment | **In flight** — FinBERT + cache + `news_sentiment_mean_z` in dataset/predict; full data coverage TBD |
 | **W8** | Time-series / gradient-boosted forecasting | **Planned** — comparative evaluation under same tracking layer |
 | **W10** | RAG assistant over curated documents | **Planned** — retrieval + LLM, guardrails |

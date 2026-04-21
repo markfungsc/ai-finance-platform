@@ -1,4 +1,6 @@
+import argparse
 import json
+import os
 from pathlib import Path
 
 try:
@@ -19,11 +21,11 @@ from ml.models.registry import MODEL_REGISTRY
 logger = get_logger(__name__)
 
 
-def run_experiment(model_name: str = "logistic_regression"):
+def run_experiment(model_name: str = "logistic_regression", end_date: str | None = None):
     print(f"Running experiment for model: {model_name}")
     pooled_symbols = get_pooled_dataset_symbols()
     print(f"Pooled symbols: {pooled_symbols}")
-    X, y, df_merged = load_train_dataset()
+    X, y, df_merged = load_train_dataset(end_date=end_date)
     print(f"X shape: {df_merged.shape}")
     run_symbol = "pooled"
 
@@ -186,6 +188,14 @@ def run_experiment(model_name: str = "logistic_regression"):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--end-date",
+        default=os.getenv("EXPERIMENT_END_DATE"),
+        help="Optional inclusive end-date cutoff (YYYY-MM-DD) for experiment data.",
+    )
+    args = parser.parse_args()
+
     model_names = ["random_forest"]
     for model_name in model_names:
-        run_experiment(model_name)
+        run_experiment(model_name, end_date=args.end_date)

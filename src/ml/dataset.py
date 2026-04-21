@@ -46,11 +46,24 @@ def get_pooled_dataset_symbols() -> list[str]:
     return out
 
 
-def load_train_dataset(debug_merge: bool = False):
+def load_train_dataset(
+    debug_merge: bool = False,
+    end_date: str | None = None,
+):
     syms = get_pooled_dataset_symbols()
     # Sequential fetch + no inner chunk parallelism keeps peak RAM lower (OOM on large pools).
-    df_all = fetch_features_many(syms, parallel=False, max_workers=1)
-    df_z_all = fetch_features_z_many(syms, parallel=False, max_workers=1)
+    df_all = fetch_features_many(
+        syms,
+        parallel=False,
+        max_workers=1,
+        end_date=end_date,
+    )
+    df_z_all = fetch_features_z_many(
+        syms,
+        parallel=False,
+        max_workers=1,
+        end_date=end_date,
+    )
     df_all = df_all.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     df_z_all = df_z_all.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     # single context attach
