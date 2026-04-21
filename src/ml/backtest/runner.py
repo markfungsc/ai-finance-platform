@@ -7,8 +7,12 @@ from constants import (
     THRESHOLD_CALMAR_EPS,
     THRESHOLD_MAX_MEAN_ABS_DRAWDOWN,
     THRESHOLD_MIN_AVG_PROFIT_FACTOR,
+    THRESHOLD_MULTI_METRICS,
+    THRESHOLD_MULTI_TOP_K_MAX,
+    THRESHOLD_MULTI_TOP_K_START,
     THRESHOLD_OBJECTIVE,
     THRESHOLD_SELECTION_LAMBDA_DD,
+    THRESHOLD_SELECTION_MODE,
     THRESHOLD_TRADING_DAYS_PER_TWO_MONTHS,
 )
 from log_config import get_logger
@@ -201,6 +205,7 @@ def run_backtest(
                 "y_train_head": y_train.head().copy(),
                 "X_test_head": X_test.head().copy(),
                 "y_test_head": y_test.head().copy(),
+                "y_test": y_test.copy(),
                 "probs": probs.copy(),
                 "df_pred_for_backtest": df_pred_for_backtest,
                 "df_test_rows": df_test_rows.copy(),
@@ -242,6 +247,10 @@ def run_backtest(
             if threshold_trading_days_per_two_months is not None
             else int(THRESHOLD_TRADING_DAYS_PER_TWO_MONTHS)
         ),
+        selection_mode=THRESHOLD_SELECTION_MODE,
+        multi_top_k_start=THRESHOLD_MULTI_TOP_K_START,
+        multi_top_k_max=THRESHOLD_MULTI_TOP_K_MAX,
+        multi_metrics_spec=THRESHOLD_MULTI_METRICS,
     )
     best_thr = float(threshold_optimization["best_threshold"])
     for d in split_details:

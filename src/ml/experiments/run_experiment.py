@@ -20,8 +20,11 @@ logger = get_logger(__name__)
 
 
 def run_experiment(model_name: str = "logistic_regression"):
+    print(f"Running experiment for model: {model_name}")
     pooled_symbols = get_pooled_dataset_symbols()
+    print(f"Pooled symbols: {pooled_symbols}")
     X, y, df_merged = load_train_dataset()
+    print(f"X shape: {df_merged.shape}")
     run_symbol = "pooled"
 
     _results, summary, model = run_backtest(

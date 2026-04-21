@@ -64,7 +64,7 @@ backtest:
 	export PYTHONPATH=src && python src/ml/backtest/run_backtest.py
 
 experiments:
-	export PYTHONPATH=src && python src/ml/experiments/run_experiment.py
+	export PYTHONPATH=src && export THRESHOLD_SELECTION_MODE=multi_top_k && python src/ml/experiments/run_experiment.py
 
 view-results:
 	export PYTHONPATH=src && python src/ml/experiments/view_results.py

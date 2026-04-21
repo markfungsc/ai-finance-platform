@@ -14,10 +14,13 @@ from ml.backtest.threshold_optimization import (
     OBJECTIVE_MAXIMIN_CUM_RETURN,
     OBJECTIVE_MEDIAN_CUM_RETURN,
     OBJECTIVE_RISK_PENALTY,
+    SELECTION_MODE_MULTI_TOP_K,
+    SELECTION_MODE_SINGLE,
     aggregate_split_metrics,
     count_total_backtest_trading_days,
     effective_min_total_trades,
     optimize_thresholds,
+    select_best_threshold_multi_top_k,
     threshold_selection_score,
 )
 
@@ -48,6 +51,7 @@ def test_aggregate_split_metrics_median_and_min():
     assert agg["avg_cum_return"] == pytest.approx((1.1 + 1.3 + 1.2) / 3)
     assert agg["median_cum_return"] == pytest.approx(1.2)
     assert agg["min_cum_return"] == pytest.approx(1.1)
+    assert agg["avg_directional_accuracy_strategy"] == pytest.approx(0.0)
     assert agg["total_trades"] == 15
 
 
@@ -295,6 +299,8 @@ def test_optimize_thresholds_reports_trade_floor_metadata():
     out = optimize_thresholds([], False)
     assert out["min_total_trades_effective"] == 5
     assert out["total_backtest_trading_days"] == 0
+    assert out["selection_mode"] == SELECTION_MODE_SINGLE
+    assert out["multi_top_k_meta"] is None
 
 
 def test_grid_includes_per_split_metrics():
@@ -322,3 +328,108 @@ def test_grid_includes_per_split_metrics():
     assert len(row["per_split"]) == 2
     assert [p["split"] for p in row["per_split"]] == [7, 8]
     assert row["per_split"][0]["cum_return"] == pytest.approx(1.1)
+
+
+def test_select_best_threshold_multi_top_k_smallest_k_wins():
+    """Middle row ranks 2nd on both metrics -> max rank 2; wins at K=2 over extremes."""
+    pool = [
+        {
+            "threshold": 0.1,
+            "avg_cum_return": 2.0,
+            "avg_max_drawdown": -0.5,
+            "selection_score": 10.0,
+        },
+        {
+            "threshold": 0.2,
+            "avg_cum_return": 1.2,
+            "avg_max_drawdown": -0.2,
+            "selection_score": 2.0,
+        },
+        {
+            "threshold": 0.3,
+            "avg_cum_return": 1.0,
+            "avg_max_drawdown": -0.05,
+            "selection_score": 1.0,
+        },
+    ]
+    best, meta = select_best_threshold_multi_top_k(
+        pool,
+        metric_names=["avg_cum_return", "avg_max_drawdown"],
+        k_start=2,
+        k_max=5,
+    )
+    assert best["threshold"] == pytest.approx(0.2)
+    assert meta["k_effective"] == 2
+    assert meta["fallback"] is None
+
+
+def test_optimize_thresholds_multi_top_k_picks_balanced_threshold():
+    """Single-objective calmar can favor one row; multi_top_k favors better mean rank."""
+
+    def fake_metrics(df_pred, threshold, df_test_rows, pooled_mode):
+        if threshold <= 0.15:
+            # Strong calmar_proxy vs moderate row below.
+            return _m(3.0, -0.5, 10, profit_factor=0.7)
+        return _m(1.15, -0.05, 10, profit_factor=1.8)
+
+    split_details = [{"df_pred_for_backtest": None, "df_test_rows": None}]
+    thresholds = np.array([0.1, 0.5])
+
+    with patch(
+        "ml.backtest.threshold_optimization.metrics_for_split_at_threshold",
+        side_effect=fake_metrics,
+    ):
+        out_single = optimize_thresholds(
+            split_details,
+            False,
+            thresholds=thresholds,
+            min_total_trades=1,
+            objective=OBJECTIVE_CALMAR_PROXY,
+            selection_mode=SELECTION_MODE_SINGLE,
+        )
+        out_multi = optimize_thresholds(
+            split_details,
+            False,
+            thresholds=thresholds,
+            min_total_trades=1,
+            objective=OBJECTIVE_CALMAR_PROXY,
+            selection_mode=SELECTION_MODE_MULTI_TOP_K,
+            multi_top_k_start=2,
+            multi_top_k_max=3,
+            multi_metrics_spec=(
+                "avg_cum_return,avg_max_drawdown,avg_profit_factor"
+            ),
+        )
+
+    assert out_single["best_threshold"] == pytest.approx(0.1)
+    assert out_multi["best_threshold"] == pytest.approx(0.5)
+    assert out_multi["selection_mode"] == SELECTION_MODE_MULTI_TOP_K
+    assert out_multi["multi_top_k_meta"] is not None
+
+
+def test_grid_includes_avg_mae_at_threshold_with_y_test():
+    split_details = [
+        {
+            "df_pred_for_backtest": None,
+            "df_test_rows": None,
+            "probs": np.array([0.3, 0.6, 0.5]),
+            "y_test": np.array([0.0, 1.0, 0.0]),
+        }
+    ]
+    thresholds = np.array([0.25, 0.55])
+
+    with patch(
+        "ml.backtest.threshold_optimization.metrics_for_split_at_threshold",
+        return_value=_m(1.1, -0.1, 10),
+    ):
+        out = optimize_thresholds(
+            split_details,
+            False,
+            thresholds=thresholds,
+            min_total_trades=1,
+        )
+
+    assert "avg_mae_at_threshold" in out["grid"][0]
+    # t=0.25 -> all preds 1 vs [0,1,0] => MAE 2/3; t=0.55 -> [0,1,0] => MAE 0
+    assert out["grid"][0]["avg_mae_at_threshold"] == pytest.approx(2.0 / 3)
+    assert out["grid"][1]["avg_mae_at_threshold"] == pytest.approx(0.0)
