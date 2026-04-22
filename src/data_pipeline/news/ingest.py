@@ -17,6 +17,7 @@ from data_pipeline.news.sec_adapter import fetch_sec_news_async, iter_sec_news
 from data_pipeline.news.yfinance_adapter import iter_yfinance_news
 from database.news_queries import insert_clean_article, upsert_raw_news
 from log_config import get_logger
+from universe.resolve import resolve_ingestion_universe
 
 logger = get_logger(__name__)
 
@@ -298,8 +299,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument(
         "--symbols",
         nargs="*",
-        default=list(TRAIN_SYMBOLS),
-        help="Symbols (default: TRAIN_SYMBOLS)",
+        default=None,
+        help="Symbols (default: resolve from INGESTION_UNIVERSE, fallback TRAIN_SYMBOLS)",
     )
     ap.add_argument(
         "--score-finbert",
@@ -335,7 +336,20 @@ def main(argv: list[str] | None = None) -> None:
             f"Unsupported --kaggle-dataset-key: {bad}. "
             f"Allowed={sorted(KAGGLE_DATASETS.keys())}"
         )
-    symbols = [s.strip().upper() for s in args.symbols if s.strip()]
+    if args.symbols:
+        symbols = [s.strip().upper() for s in args.symbols if s.strip()]
+    else:
+        try:
+            _mode, resolved = resolve_ingestion_universe()
+            symbols = [s.strip().upper() for s in resolved if s and str(s).strip()]
+            logger.info(
+                "Using symbols from INGESTION_UNIVERSE resolver: count=%d", len(symbols)
+            )
+        except Exception:
+            logger.exception(
+                "Failed to resolve INGESTION_UNIVERSE for news ingest; falling back to TRAIN_SYMBOLS"
+            )
+            symbols = list(TRAIN_SYMBOLS)
     state = {
         "t0": time.time(),
         "done": False,

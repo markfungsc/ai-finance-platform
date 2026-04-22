@@ -14,6 +14,7 @@ from database.news_queries import (
     upsert_daily_symbol_sentiment_rows,
 )
 from log_config import get_logger
+from universe.resolve import resolve_ingestion_universe
 
 logger = get_logger(__name__)
 
@@ -68,8 +69,21 @@ def recompute_daily_rollups() -> int:
             columns=["symbol", "published_at", "finbert_scalar", "as_of_date"]
         )
 
+    try:
+        _mode, resolved_symbols = resolve_ingestion_universe()
+        symbols = [s.strip().upper() for s in resolved_symbols if s and str(s).strip()]
+        logger.info(
+            "Using symbols from INGESTION_UNIVERSE resolver for rollup: count=%d",
+            len(symbols),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to resolve INGESTION_UNIVERSE for rollup; falling back to TRAIN_SYMBOLS"
+        )
+        symbols = list(TRAIN_SYMBOLS)
+
     raw_rows: list[dict] = []
-    for sym in TRAIN_SYMBOLS:
+    for sym in symbols:
         day_df = fetch_feature_days_for_symbol(sym)
         if day_df.empty:
             continue

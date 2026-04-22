@@ -11,6 +11,35 @@ from sqlalchemy import text
 from database.connection import engine
 
 
+def fetch_recent_clean_news(
+    symbol: str,
+    *,
+    since_utc,
+    limit: int = 10,
+) -> pd.DataFrame:
+    """Recent clean-news rows for one symbol, newest first."""
+    q = text(
+        """
+        SELECT id, symbol, published_at, title, summary, finbert_scalar
+        FROM clean_news_articles
+        WHERE symbol = :symbol
+          AND published_at >= :since_utc
+        ORDER BY published_at DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql_query(
+            q,
+            conn,
+            params={
+                "symbol": symbol.upper(),
+                "since_utc": since_utc,
+                "limit": int(limit),
+            },
+        )
+
+
 def fetch_clean_news_for_rollup() -> pd.DataFrame:
     """Return rows needed for daily sentiment rollups."""
     q = text("""

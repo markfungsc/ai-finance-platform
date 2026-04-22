@@ -16,6 +16,7 @@ from ml.sentiment.qdrant_store import (
     ensure_news_collection,
     get_client,
 )
+from universe.resolve import resolve_ingestion_universe
 
 logger = get_logger(__name__)
 
@@ -95,12 +96,61 @@ def embed_and_upsert_symbol(symbol: str, *, limit: int | None = None) -> int:
     return len(points)
 
 
+def embed_and_upsert_all_symbols(
+    *,
+    start_at: str | None = None,
+    limit: int | None = None,
+) -> int:
+    _mode, symbols = resolve_ingestion_universe()
+    symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    if start_at:
+        start = start_at.strip().upper()
+        if start not in symbols:
+            raise ValueError(f"--start-at symbol not found in resolved universe: {start}")
+        symbols = symbols[symbols.index(start) :]
+    if limit is not None:
+        symbols = symbols[: max(0, int(limit))]
+    if not symbols:
+        logger.warning("No symbols resolved for embed --all")
+        return 0
+
+    total_points = 0
+    total_symbols = len(symbols)
+    logger.info("Embedding universe symbols: count=%d", total_symbols)
+    for idx, sym in enumerate(symbols, start=1):
+        logger.info("[%d/%d] embedding %s", idx, total_symbols, sym)
+        total_points += int(embed_and_upsert_symbol(sym))
+    logger.info(
+        "Completed universe embedding: symbols=%d points=%d",
+        total_symbols,
+        total_points,
+    )
+    return total_points
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Embed clean news into Qdrant")
-    ap.add_argument("--symbol", required=True, help="Ticker symbol")
+    ap.add_argument("--symbol", help="Ticker symbol")
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="Embed all symbols from resolve_ingestion_universe()",
+    )
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument(
+        "--start-at",
+        default=None,
+        help="When --all, start embedding from this symbol in resolved order",
+    )
     args = ap.parse_args(argv)
-    embed_and_upsert_symbol(args.symbol, limit=args.limit)
+    if args.all and args.symbol:
+        raise SystemExit("Pass either --symbol or --all, not both")
+    if not args.all and not args.symbol:
+        raise SystemExit("Pass --symbol <TICKER> or --all")
+    if args.all:
+        embed_and_upsert_all_symbols(start_at=args.start_at, limit=args.limit)
+    else:
+        embed_and_upsert_symbol(args.symbol, limit=args.limit)
 
 
 if __name__ == "__main__":

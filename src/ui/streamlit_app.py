@@ -89,6 +89,7 @@ def main() -> None:
             symbol = st.text_input("Symbol", value="AAPL").strip().upper()
         with col2:
             run = st.button("Predict", type="primary")
+        run_analysis = st.button("Trade analysis")
 
         if run and symbol:
             try:
@@ -132,6 +133,25 @@ def main() -> None:
                     st.markdown("**Global Feature Importance (model)**")
                     gfi = pd.DataFrame(data.get("global_feature_importance") or [])
                     st.dataframe(gfi, width="stretch", height=260)
+            except requests.HTTPError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.exception(e)
+
+        if run_analysis and symbol:
+            try:
+                analysis = _post("/trade-analysis", {"ticker": symbol})
+                st.subheader("Trade analysis")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Adjusted score", f"{float(analysis['adjusted_score']):.4f}")
+                m2.metric("Conviction", str(analysis.get("conviction_label", "unknown")))
+                m3.metric("Confidence", f"{float(analysis.get('confidence', 0.0)):.2f}")
+                st.write(str(analysis.get("rationale_brief", "")))
+                risk_flags = analysis.get("risk_flags") or []
+                if risk_flags:
+                    st.warning("Risk flags: " + ", ".join(str(x) for x in risk_flags))
+                with st.expander("Analysis payload"):
+                    st.json(analysis)
             except requests.HTTPError as e:
                 st.error(str(e))
             except Exception as e:

@@ -42,6 +42,7 @@ from ml.inference.api_inference import (
     predict_trade_success_probability,
     scanner_evaluate_symbol,
 )
+from ml.inference.trade_analysis import build_trade_analysis
 from ml.models.save_loads import load_feature_columns, load_model, load_scaler
 from ui.backtest_tab import load_backtest_csv
 from universe.resolve import resolve_ingestion_universe
@@ -160,6 +161,31 @@ class PredictSymbolExplainResponse(BaseModel):
     chart_history: list[dict] = Field(default_factory=list)
     latest_bar_timestamp: str | None = None
     indicator_context_tags: list[str] = Field(default_factory=list)
+
+
+class TradeAnalysisRequest(BaseModel):
+    ticker: str = Field(..., min_length=1, examples=["NVDA"])
+    market_regime: str | None = None
+    top_k_news: int = Field(default=6, ge=1, le=25)
+    news_lookback_days: int = Field(default=7, ge=1, le=60)
+
+
+class TradeAnalysisResponse(BaseModel):
+    ticker: str
+    probability: float
+    best_threshold: float
+    sentiment_snapshot: float
+    technical_context_tags: list[str] = Field(default_factory=list)
+    news_summary: str
+    conviction_score: float
+    conviction_label: str
+    risk_flags: list[str] = Field(default_factory=list)
+    adjusted_score: float
+    adjustment_breakdown: dict
+    grounding_refs: dict
+    insufficient_evidence: bool
+    confidence: float
+    rationale_brief: str
 
 
 class ThresholdGridResponse(BaseModel):
@@ -729,6 +755,62 @@ def predict_symbol_explain(body: PredictSymbolRequest):
         latest_bar_timestamp=latest_bar_timestamp,
         indicator_context_tags=ctx_tags,
     )
+
+
+@app.post("/trade-analysis", response_model=TradeAnalysisResponse)
+def trade_analysis(body: TradeAnalysisRequest):
+    ticker = body.ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=422, detail="ticker must be non-empty")
+    try:
+        X, _y, df_merged = load_dataset(ticker, debug_merge=False, quiet=True)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"failed loading features: {e}") from e
+    if X.empty:
+        raise HTTPException(status_code=422, detail=f"No feature rows for ticker {ticker!r}")
+
+    feature_cols = app.state.feature_cols
+    row = X.iloc[[-1]].copy()
+    missing = [c for c in feature_cols if c not in row.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing feature columns for {ticker!r}: {missing[:20]}",
+        )
+    x_aligned = row[feature_cols]
+    if app.state.scaler is not None:
+        x_model = app.state.scaler.transform(x_aligned.to_numpy())
+    else:
+        x_model = x_aligned
+    if hasattr(app.state.model, "predict_proba"):
+        p = float(app.state.model.predict_proba(x_model)[0, 1])
+    else:
+        p = float(np.clip(app.state.model.predict(x_model)[0], 0.0, 1.0))
+    threshold_used = float(app.state.best_threshold)
+
+    df_hist = fetch_features(ticker).sort_values("timestamp").reset_index(drop=True)
+    vol_roll = (
+        pd.to_numeric(df_hist["volume"], errors="coerce")
+        .rolling(20, min_periods=1)
+        .mean()
+    )
+    v_last = vol_roll.iloc[-1] if len(vol_roll) else np.nan
+    last_merged = df_merged.iloc[-1].copy()
+    last_merged["volume_sma_20"] = float(v_last) if pd.notna(v_last) else np.nan
+    technical_tags = indicator_context_tags(last_merged)
+    sentiment_score = float(pd.to_numeric(pd.Series([last_merged.get("sym_sentiment_d1")]), errors="coerce").fillna(0.0).iloc[0])
+
+    result = build_trade_analysis(
+        ticker=ticker,
+        model_probability=p,
+        threshold_used=threshold_used,
+        sentiment_score=sentiment_score,
+        technical_summary=technical_tags,
+        market_regime=body.market_regime,
+        top_k_news=body.top_k_news,
+        news_lookback_days=body.news_lookback_days,
+    )
+    return TradeAnalysisResponse(**result)
 
 
 @app.get("/threshold_grid", response_model=ThresholdGridResponse)

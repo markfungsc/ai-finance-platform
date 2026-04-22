@@ -23,7 +23,9 @@ def test_rollup_writes_neutral_for_days_without_news(monkeypatch):
     )
     captured = {}
 
-    monkeypatch.setattr(rollup_daily, "TRAIN_SYMBOLS", ["AAPL"])
+    monkeypatch.setattr(
+        rollup_daily, "resolve_ingestion_universe", lambda: ("sp500", ["AAPL"])
+    )
     monkeypatch.setattr(rollup_daily, "fetch_clean_news_for_rollup", lambda: clean)
     monkeypatch.setattr(
         rollup_daily, "fetch_feature_days_for_symbol", lambda _s: feature_days

@@ -2,6 +2,8 @@
 
 Practical runbook for day-to-day execution: setup, scanner/API workflows, experiments, and sentiment/news operations.
 
+For planned decision-intelligence roadmap work (not yet implemented), see [`docs/NEXT_STEPS_DECISION_INTELLIGENCE.md`](NEXT_STEPS_DECISION_INTELLIGENCE.md).
+
 ## What You Can Run Today
 
 - Medallion-style market data path in Postgres: `raw_stock_prices` -> `clean_stock_prices` -> `stock_features` / `stock_features_zscore`

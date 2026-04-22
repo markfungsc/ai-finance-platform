@@ -846,3 +846,90 @@ def test_scanner_scan_job_lifecycle_failed(tmp_path, monkeypatch):
     assert r_status.status_code == 200
     assert r_status.json()["status"] == "failed"
     assert "scan boom" in (r_status.json().get("error") or "")
+
+
+def test_trade_analysis_endpoint_contract(tmp_path, monkeypatch):
+    model_path = tmp_path / "m.pkl"
+    feat_path = tmp_path / "f.pkl"
+    joblib.dump(_ProbaModel(), model_path)
+    joblib.dump(["a", "b"], feat_path)
+    monkeypatch.setenv("MODEL_PATH", str(model_path))
+    monkeypatch.setenv("FEATURE_COLUMNS_PATH", str(feat_path))
+    monkeypatch.delenv("SCALER_PATH", raising=False)
+
+    import api.main as api_main
+
+    importlib.reload(api_main)
+    from fastapi.testclient import TestClient
+
+    X = pd.DataFrame({"a": [1.0], "b": [2.0]})
+    merged = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-04-21T00:00:00Z")],
+            "symbol": ["NVDA"],
+            "sym_sentiment_d1": [0.42],
+            "ema_10": [10.0],
+            "ema_20": [9.5],
+            "macd": [0.8],
+            "macd_signal": [0.2],
+            "rsi_14": [55.0],
+            "volume": [1000.0],
+        }
+    )
+    hist = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-04-21T00:00:00Z")],
+            "volume": [1000.0],
+        }
+    )
+
+    with TestClient(api_main.app) as client:
+        with patch.object(
+            api_main, "load_dataset", return_value=(X, pd.Series([0]), merged)
+        ), patch.object(api_main, "fetch_features", return_value=hist), patch.object(
+            api_main,
+            "build_trade_analysis",
+            return_value={
+                "ticker": "NVDA",
+                "probability": 0.63,
+                "best_threshold": 0.33,
+                "sentiment_snapshot": 0.42,
+                "technical_context_tags": ["EMA short above long"],
+                "news_summary": "headline",
+                "conviction_score": 0.2,
+                "conviction_label": "medium",
+                "risk_flags": [],
+                "adjusted_score": 0.66,
+                "adjustment_breakdown": {"base_probability": 0.63},
+                "grounding_refs": {"symbol_news_ids": [], "qdrant_article_ids": []},
+                "insufficient_evidence": False,
+                "confidence": 0.7,
+                "rationale_brief": "ok",
+            },
+        ):
+            r = client.post("/trade-analysis", json={"ticker": "NVDA"})
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["ticker"] == "NVDA"
+    assert payload["probability"] == pytest.approx(0.63)
+    assert "adjustment_breakdown" in payload
+
+
+def test_trade_analysis_llm_json_parser_and_fallback():
+    from ml.inference.trade_analysis import parse_llm_json
+
+    out = parse_llm_json(
+        json.dumps(
+            {
+                "conviction_score": 2.0,
+                "adjustment": 0.4,
+                "risk_flags": ["event_risk"],
+                "rationale": "x",
+            }
+        )
+    )
+    assert out["conviction_score"] == pytest.approx(1.0)
+    assert out["adjustment"] == pytest.approx(0.10)
+    with pytest.raises(ValueError):
+        parse_llm_json(json.dumps({"conviction_score": 0.2}))

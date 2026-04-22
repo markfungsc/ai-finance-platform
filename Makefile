@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup embed-news-qdrant
+.PHONY: lint fmt up down logs migrate universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup embed-news-qdrant embed-news-qdrant-all
 
 up:
 	cd infra && docker compose up -d
@@ -151,6 +151,14 @@ sentiment-rollup:
 
 embed-news-qdrant:
 	@echo 'Usage: make embed-news-qdrant SYM=AAPL' && export PYTHONPATH=src && python src/ml/sentiment/embed_sync.py --symbol $${SYM:-AAPL}
+
+embed-news-qdrant-all:
+	@echo 'Usage: make embed-news-qdrant-all [INGESTION_UNIVERSE=sp500|subscriptions] [LIMIT=50] [START_AT=NVDA]' && \
+	export PYTHONPATH=src && \
+	export INGESTION_UNIVERSE=$${INGESTION_UNIVERSE:-sp500} && \
+	python src/ml/sentiment/embed_sync.py --all \
+		$$( [ -n "$${LIMIT:-}" ] && printf '%s %s' --limit "$${LIMIT}" ) \
+		$$( [ -n "$${START_AT:-}" ] && printf '%s %s' --start-at "$${START_AT}" )
 
 serve-api:
 	export PYTHONPATH=src && uvicorn api.main:app --host 0.0.0.0 --port 8000

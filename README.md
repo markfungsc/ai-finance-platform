@@ -8,6 +8,12 @@ The system implements a **medallion-style data architecture** in PostgreSQL—ra
 
 Operational runbooks and day-to-day commands live in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
+## Next strategic move
+
+The next milestone is a **decision-intelligence layer** that augments existing model signals with explainability, news reasoning, and risk context. The intent is to improve trade selection confidence and filtering, not to replace the core model with direct LLM price prediction.
+
+Planned roadmap (docs only, no code changes yet): [`docs/NEXT_STEPS_DECISION_INTELLIGENCE.md`](docs/NEXT_STEPS_DECISION_INTELLIGENCE.md).
+
 ## Current scope
 
 | Layer | Relation | Function |
