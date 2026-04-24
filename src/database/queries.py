@@ -86,6 +86,10 @@ _FETCH_LATEST_Z_MANY_SQL = """
     ORDER BY symbol, timestamp DESC
 """
 
+_FRESHNESS_TABLES = frozenset(
+    {"clean_stock_prices", "stock_features", "stock_features_zscore"}
+)
+
 
 def delete_incomplete_stock_feature_rows(symbol: str) -> int:
     """Delete rows for ``symbol`` in ``[ts_min, ts_max]`` with NULL in any feature column.
@@ -394,6 +398,34 @@ def fetch_latest_features_z_many(symbols: list[str]) -> pd.DataFrame:
     with engine.connect() as conn:
         out = pd.read_sql(query, conn, params={"symbols": unique})
     return out.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+
+def fetch_latest_timestamp_per_symbol_for_table(
+    table_name: str, symbols: list[str]
+) -> dict[str, object]:
+    """Return latest timestamp per symbol for a supported freshness table."""
+    if table_name not in _FRESHNESS_TABLES:
+        raise ValueError(f"unsupported table for freshness: {table_name!r}")
+    unique = [s.strip().upper() for s in symbols if s and str(s).strip()]
+    unique = list(dict.fromkeys(unique))
+    if not unique:
+        return {}
+    query = text(
+        f"""
+        SELECT symbol, MAX(timestamp) AS ts
+        FROM {table_name}
+        WHERE symbol = ANY(:symbols)
+        GROUP BY symbol
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query, {"symbols": unique}).fetchall()
+    out: dict[str, object] = {}
+    for sym, ts in rows:
+        if sym is None or ts is None:
+            continue
+        out[str(sym).strip().upper()] = ts
+    return out
 
 
 def fetch_features_window(symbols: list[str], ts_min, ts_max) -> pd.DataFrame:

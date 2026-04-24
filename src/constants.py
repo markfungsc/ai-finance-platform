@@ -38,9 +38,9 @@ THRESHOLD_TRADING_DAYS_PER_TWO_MONTHS = 42
 # ``single_objective``: maximize selection_score (legacy).
 # ``multi_top_k``: each metric rank (within pool) must be <= K; relax K until non-empty
 # or fall back to best mean rank (see ml.backtest.threshold_optimization).
-THRESHOLD_SELECTION_MODE = os.environ.get(
-    "THRESHOLD_SELECTION_MODE", "single_objective"
-).strip().lower()
+THRESHOLD_SELECTION_MODE = (
+    os.environ.get("THRESHOLD_SELECTION_MODE", "single_objective").strip().lower()
+)
 THRESHOLD_MULTI_TOP_K_START = int(os.environ.get("THRESHOLD_MULTI_TOP_K_START", "3"))
 THRESHOLD_MULTI_TOP_K_MAX = int(os.environ.get("THRESHOLD_MULTI_TOP_K_MAX", "16"))
 _DEFAULT_THRESHOLD_MULTI_METRICS = (

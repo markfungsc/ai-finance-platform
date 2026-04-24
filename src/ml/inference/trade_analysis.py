@@ -76,9 +76,14 @@ def build_trade_analysis(
     )
     symbol_rows = news_df.to_dict(orient="records") if not news_df.empty else []
     symbol_ids = [str(r.get("id")) for r in symbol_rows if r.get("id") is not None]
-    symbol_news_summary = " | ".join(
-        str(r.get("title", "")).strip() for r in symbol_rows[:3] if str(r.get("title", "")).strip()
-    ) or "No recent symbol headlines."
+    symbol_news_summary = (
+        " | ".join(
+            str(r.get("title", "")).strip()
+            for r in symbol_rows[:3]
+            if str(r.get("title", "")).strip()
+        )
+        or "No recent symbol headlines."
+    )
 
     retrieval = retrieve_similar_news_payloads_with_meta(
         symbol=ticker,
@@ -102,7 +107,9 @@ def build_trade_analysis(
         risk_flags.append("limited_symbol_news")
 
     sentiment_adjustment = clamp(sentiment_score * 0.04, -0.06, 0.06)
-    conviction_score = clamp((model_probability - threshold_used) * 1.5 + sentiment_adjustment, -1.0, 1.0)
+    conviction_score = clamp(
+        (model_probability - threshold_used) * 1.5 + sentiment_adjustment, -1.0, 1.0
+    )
     conviction_adjustment = clamp(conviction_score * 0.05, -0.08, 0.08)
     final_adjustment = clamp(sentiment_adjustment + conviction_adjustment, -0.10, 0.10)
     rationale = (
@@ -129,7 +136,15 @@ def build_trade_analysis(
         rationale = str(llm.get("rationale") or rationale)
 
     adjusted = clamp(model_probability + final_adjustment, 0.0, 1.0)
-    label = "high" if abs(conviction_score) >= 0.7 else "medium_high" if abs(conviction_score) >= 0.35 else "medium" if abs(conviction_score) >= 0.1 else "low"
+    label = (
+        "high"
+        if abs(conviction_score) >= 0.7
+        else "medium_high"
+        if abs(conviction_score) >= 0.35
+        else "medium"
+        if abs(conviction_score) >= 0.1
+        else "low"
+    )
     insufficient = len(symbol_rows) == 0 and len(qdrant_hits) == 0
 
     return {

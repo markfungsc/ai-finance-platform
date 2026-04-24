@@ -21,7 +21,9 @@ from ml.models.registry import MODEL_REGISTRY
 logger = get_logger(__name__)
 
 
-def run_experiment(model_name: str = "logistic_regression", end_date: str | None = None):
+def run_experiment(
+    model_name: str = "logistic_regression", end_date: str | None = None
+):
     print(f"Running experiment for model: {model_name}")
     pooled_symbols = get_pooled_dataset_symbols()
     print(f"Pooled symbols: {pooled_symbols}")

@@ -7,6 +7,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
+from hashlib import sha1
 from pathlib import Path
 from threading import Lock, Thread
 
@@ -15,7 +16,6 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -24,7 +24,11 @@ from data_pipeline.features.build_features import run_feature_pipeline
 from data_pipeline.ingestion.run_ingestion import run_ingestion
 from data_pipeline.processing.clean_prices import clean_prices
 from database.connection import engine
-from database.queries import fetch_features, fetch_features_window
+from database.queries import (
+    fetch_features,
+    fetch_features_window,
+    fetch_latest_timestamp_per_symbol_for_table,
+)
 from log_config import get_logger
 from market.calendar import last_completed_xnys_close_utc
 from ml.analysis.explanations import (
@@ -90,6 +94,8 @@ _scan_state: dict[str, object | None] = {
     "error": None,
     "result": None,
 }
+_freshness_cache_lock = Lock()
+_freshness_cache: dict[str, dict[str, object]] = {}
 
 BACKTEST_INDICATOR_COLUMNS: list[str] = [
     "symbol",
@@ -397,11 +403,6 @@ def _load_artifacts():
     return model, feature_cols, scaler, best_threshold, threshold_grid
 
 
-_FRESHNESS_TABLES = frozenset(
-    {"clean_stock_prices", "stock_features", "stock_features_zscore"}
-)
-
-
 def _ts_to_utc(ts) -> pd.Timestamp:
     out = pd.Timestamp(ts)
     if out.tzinfo is None:
@@ -409,17 +410,13 @@ def _ts_to_utc(ts) -> pd.Timestamp:
     return out.tz_convert("UTC")
 
 
-def _max_timestamp_per_symbol(table_name: str) -> dict[str, pd.Timestamp]:
+def _max_timestamp_per_symbol(
+    table_name: str, symbols: list[str]
+) -> dict[str, pd.Timestamp]:
     """Latest bar timestamp per symbol for ``table_name`` (UTC)."""
-    if table_name not in _FRESHNESS_TABLES:
-        raise ValueError(f"unsupported table for freshness: {table_name!r}")
-    query = text(
-        f"SELECT symbol, MAX(timestamp) AS ts FROM {table_name} GROUP BY symbol"
-    )
+    rows = fetch_latest_timestamp_per_symbol_for_table(table_name, symbols)
     out: dict[str, pd.Timestamp] = {}
-    with engine.connect() as conn:
-        rows = conn.execute(query).fetchall()
-    for sym, ts in rows:
+    for sym, ts in rows.items():
         if sym is None or ts is None:
             continue
         out[str(sym).strip().upper()] = _ts_to_utc(ts)
@@ -465,12 +462,34 @@ def _is_market_data_fresh_for_symbols(
     norm = [s.strip().upper() for s in symbols if s and str(s).strip()]
     if not norm:
         return False, None, last_close, [], []
+    cache_ttl_raw = os.environ.get(
+        "SCANNER_FRESHNESS_CACHE_TTL_SECONDS", "86400"
+    ).strip()
+    try:
+        cache_ttl_seconds = max(0, int(cache_ttl_raw))
+    except ValueError:
+        cache_ttl_seconds = 120
+    close_day = str(last_close.normalize().date())
+    symbols_hash = sha1(",".join(sorted(norm)).encode("utf-8")).hexdigest()
+    cache_key = f"{symbols_hash}:{close_day}"
+    now_epoch = time.time()
+    if cache_ttl_seconds > 0:
+        with _freshness_cache_lock:
+            cached = _freshness_cache.get(cache_key)
+        if cached is not None and float(cached.get("expires_at", 0)) > now_epoch:
+            return (
+                bool(cached["fresh"]),
+                cached["bottleneck"],
+                cached["last_close"],
+                list(cached["stale"]),
+                list(cached["stale_details"]),
+            )
 
-    d_clean = _max_timestamp_per_symbol("clean_stock_prices")
-    d_feat = _max_timestamp_per_symbol("stock_features")
-    d_z = _max_timestamp_per_symbol("stock_features_zscore")
+    d_clean = _max_timestamp_per_symbol("clean_stock_prices", norm)
+    d_feat = _max_timestamp_per_symbol("stock_features", norm)
+    d_z = _max_timestamp_per_symbol("stock_features_zscore", norm)
 
-    close_day = last_close.normalize().date()
+    close_day_dt = last_close.normalize().date()
     stale: list[str] = []
     per_symbol_floor: list[pd.Timestamp] = []
     stale_details: list[dict] = []
@@ -502,7 +521,7 @@ def _is_market_data_fresh_for_symbols(
             continue
         floor = min(t1, t2, t3)
         floor_day = floor.normalize().date()
-        if floor_day < close_day:
+        if floor_day < close_day_dt:
             stale.append(sym)
             if floor == t1:
                 bottleneck_table = "clean_stock_prices"
@@ -518,7 +537,7 @@ def _is_market_data_fresh_for_symbols(
                     "stock_features_zscore_ts": t3.isoformat(),
                     "bottleneck_table": bottleneck_table,
                     "bottleneck_timestamp": floor.isoformat(),
-                    "last_market_close_day": str(close_day),
+                    "last_market_close_day": str(close_day_dt),
                     "bottleneck_day": str(floor_day),
                     "missing_tables": [],
                 }
@@ -538,6 +557,16 @@ def _is_market_data_fresh_for_symbols(
             len(norm),
             sample,
         )
+    if cache_ttl_seconds > 0:
+        with _freshness_cache_lock:
+            _freshness_cache[cache_key] = {
+                "fresh": fresh,
+                "bottleneck": bottleneck,
+                "last_close": last_close,
+                "stale": stale,
+                "stale_details": stale_details,
+                "expires_at": now_epoch + float(cache_ttl_seconds),
+            }
     return fresh, bottleneck, last_close, stale, stale_details
 
 
@@ -549,6 +578,10 @@ def _refresh_snapshot() -> dict[str, object | None]:
 def _refresh_update(**kwargs: object) -> None:
     with _refresh_lock:
         _refresh_state.update(kwargs)
+    status = kwargs.get("status")
+    if status in {"running", "succeeded", "failed"}:
+        with _freshness_cache_lock:
+            _freshness_cache.clear()
 
 
 def _scan_snapshot() -> dict[str, object | None]:
@@ -561,27 +594,73 @@ def _scan_update(**kwargs: object) -> None:
         _scan_state.update(kwargs)
 
 
-def _run_refresh_pipeline_for_symbols(symbols: list[str]) -> None:
+def _run_refresh_pipeline_for_symbols(symbols: list[str]) -> dict[str, int]:
     run_ingestion(symbols)
-    with Session() as session:
-        for symbol in symbols:
+
+    env_clean_workers = os.environ.get("REFRESH_CLEAN_MAX_WORKERS", "4").strip()
+    env_feat_workers = os.environ.get("REFRESH_FEATURE_MAX_WORKERS", "4").strip()
+    try:
+        clean_workers = max(1, int(env_clean_workers))
+    except ValueError:
+        clean_workers = 4
+    try:
+        feature_workers = max(1, int(env_feat_workers))
+    except ValueError:
+        feature_workers = 4
+    clean_workers = min(clean_workers, max(1, len(symbols)))
+    feature_workers = min(feature_workers, max(1, len(symbols)))
+
+    clean_start = time.perf_counter()
+
+    def _clean_one(symbol: str) -> None:
+        with Session() as session:
             clean_prices(session, symbol)
-    for symbol in symbols:
-        run_feature_pipeline(symbol, backfill=False)
+
+    with ThreadPoolExecutor(max_workers=clean_workers) as ex:
+        futures = [ex.submit(_clean_one, symbol) for symbol in symbols]
+        for fut in as_completed(futures):
+            fut.result()
+    clean_stage_ms = int((time.perf_counter() - clean_start) * 1000)
+
+    features_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=feature_workers) as ex:
+        futures = [ex.submit(run_feature_pipeline, symbol, False) for symbol in symbols]
+        for fut in as_completed(futures):
+            fut.result()
+    features_stage_ms = int((time.perf_counter() - features_start) * 1000)
+    return {
+        "clean_stage_ms": clean_stage_ms,
+        "features_stage_ms": features_stage_ms,
+        "clean_workers": clean_workers,
+        "feature_workers": feature_workers,
+    }
 
 
-def _refresh_worker(symbols: list[str]) -> None:
+def _refresh_worker(
+    refresh_symbols: list[str], expected_symbols: list[str] | None = None
+) -> None:
     global _refresh_thread
     t0 = time.perf_counter()
+    expected = expected_symbols if expected_symbols is not None else refresh_symbols
     try:
-        _run_refresh_pipeline_for_symbols(symbols)
+        timing = _run_refresh_pipeline_for_symbols(refresh_symbols) or {}
         (
             fresh_after,
             latest_after,
             close_after,
             stale_after,
             stale_details_after,
-        ) = _is_market_data_fresh_for_symbols(symbols)
+        ) = _is_market_data_fresh_for_symbols(expected)
+        logger.info(
+            "refresh worker timing: refreshed_symbols=%d expected_symbols=%d clean_stage_ms=%d "
+            "features_stage_ms=%d clean_workers=%d feature_workers=%d",
+            len(refresh_symbols),
+            len(expected),
+            int(timing.get("clean_stage_ms", 0)),
+            int(timing.get("features_stage_ms", 0)),
+            int(timing.get("clean_workers", 0)),
+            int(timing.get("feature_workers", 0)),
+        )
         if not fresh_after:
             logger.warning(
                 "refresh pipeline finished but market data still stale for %d symbol(s) "
@@ -765,9 +844,13 @@ def trade_analysis(body: TradeAnalysisRequest):
     try:
         X, _y, df_merged = load_dataset(ticker, debug_merge=False, quiet=True)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"failed loading features: {e}") from e
+        raise HTTPException(
+            status_code=422, detail=f"failed loading features: {e}"
+        ) from e
     if X.empty:
-        raise HTTPException(status_code=422, detail=f"No feature rows for ticker {ticker!r}")
+        raise HTTPException(
+            status_code=422, detail=f"No feature rows for ticker {ticker!r}"
+        )
 
     feature_cols = app.state.feature_cols
     row = X.iloc[[-1]].copy()
@@ -798,7 +881,11 @@ def trade_analysis(body: TradeAnalysisRequest):
     last_merged = df_merged.iloc[-1].copy()
     last_merged["volume_sma_20"] = float(v_last) if pd.notna(v_last) else np.nan
     technical_tags = indicator_context_tags(last_merged)
-    sentiment_score = float(pd.to_numeric(pd.Series([last_merged.get("sym_sentiment_d1")]), errors="coerce").fillna(0.0).iloc[0])
+    sentiment_score = float(
+        pd.to_numeric(pd.Series([last_merged.get("sym_sentiment_d1")]), errors="coerce")
+        .fillna(0.0)
+        .iloc[0]
+    )
 
     result = build_trade_analysis(
         ticker=ticker,
@@ -836,8 +923,16 @@ def scanner_refresh_start():
     overlap_ratio = (
         float(overlap_count) / float(len(scanner_set)) if len(scanner_set) > 0 else None
     )
-    fresh, latest_common, last_close, _stale, stale_details = (
+    freshness_started = time.perf_counter()
+    fresh, latest_common, last_close, stale, stale_details = (
         _is_market_data_fresh_for_symbols(symbols)
+    )
+    freshness_check_ms = int((time.perf_counter() - freshness_started) * 1000)
+    logger.info(
+        "scanner refresh freshness check: symbols=%d stale=%d freshness_check_ms=%d",
+        len(symbols),
+        len(stale),
+        freshness_check_ms,
     )
     symbol_sample = symbols[:15]
     if fresh:
@@ -879,7 +974,12 @@ def scanner_refresh_start():
         scanner_symbol_overlap_count=overlap_count,
         scanner_symbol_overlap_ratio=overlap_ratio,
     )
-    _refresh_thread = Thread(target=_refresh_worker, args=(symbols,), daemon=True)
+    stale_symbols = stale if stale else symbols
+    _refresh_thread = Thread(
+        target=_refresh_worker,
+        args=(stale_symbols, symbols),
+        daemon=True,
+    )
     _refresh_thread.start()
     return ScannerRefreshStatusResponse(**_refresh_snapshot())
 

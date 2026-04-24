@@ -157,7 +157,9 @@ def main() -> None:
                 st.subheader("Trade analysis")
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Adjusted score", f"{float(analysis['adjusted_score']):.4f}")
-                m2.metric("Conviction", str(analysis.get("conviction_label", "unknown")))
+                m2.metric(
+                    "Conviction", str(analysis.get("conviction_label", "unknown"))
+                )
                 m3.metric("Confidence", f"{float(analysis.get('confidence', 0.0)):.2f}")
                 st.write(str(analysis.get("rationale_brief", "")))
                 risk_flags = analysis.get("risk_flags") or []

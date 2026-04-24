@@ -200,7 +200,9 @@ def fetch_daily_symbol_sentiment_df() -> pd.DataFrame:
         return pd.read_sql_query(q, conn)
 
 
-def upsert_daily_symbol_sentiment_rows(rows: list[dict], *, chunk_size: int = 2000) -> None:
+def upsert_daily_symbol_sentiment_rows(
+    rows: list[dict], *, chunk_size: int = 2000
+) -> None:
     """rows: z=news_sentiment_mean_z; horizon cols are rolling z; news_volume is rolling z of log1p(raw 24h count)."""
     if not rows:
         return

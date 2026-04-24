@@ -106,7 +106,9 @@ def embed_and_upsert_all_symbols(
     if start_at:
         start = start_at.strip().upper()
         if start not in symbols:
-            raise ValueError(f"--start-at symbol not found in resolved universe: {start}")
+            raise ValueError(
+                f"--start-at symbol not found in resolved universe: {start}"
+            )
         symbols = symbols[symbols.index(start) :]
     if limit is not None:
         symbols = symbols[: max(0, int(limit))]

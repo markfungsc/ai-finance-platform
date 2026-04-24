@@ -476,7 +476,7 @@ def test_is_market_data_fresh_for_symbols_all_symbols_current():
     importlib.reload(api_main)
     last_close = pd.Timestamp("2026-01-02T21:00:00Z")
 
-    def _same_per_sym(_table: str) -> dict[str, pd.Timestamp]:
+    def _same_per_sym(_table: str, *_args) -> dict[str, pd.Timestamp]:
         return {"AAPL": last_close, "MSFT": last_close}
 
     with patch.object(
@@ -502,7 +502,7 @@ def test_is_market_data_fresh_for_symbols_stale_when_one_symbol_behind():
     last_close = pd.Timestamp("2026-01-02T21:00:00Z")
     old = pd.Timestamp("2025-12-01T21:00:00Z")
 
-    def _mixed(_table: str) -> dict[str, pd.Timestamp]:
+    def _mixed(_table: str, *_args) -> dict[str, pd.Timestamp]:
         return {"AAPL": last_close, "MSFT": old}
 
     with patch.object(
@@ -531,7 +531,7 @@ def test_is_market_data_fresh_for_symbols_allows_same_day_timestamp_offsets():
     importlib.reload(api_main)
     last_close = pd.Timestamp("2026-04-16T20:00:00Z")
 
-    def _offset_per_sym(_table: str) -> dict[str, pd.Timestamp]:
+    def _offset_per_sym(_table: str, *_args) -> dict[str, pd.Timestamp]:
         return {
             "AAPL": pd.Timestamp("2026-04-16T04:00:00Z"),
             "^VIX": pd.Timestamp("2026-04-16T05:15:00Z"),

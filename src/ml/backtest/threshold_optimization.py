@@ -289,7 +289,11 @@ def select_best_threshold_multi_top_k(
         }
 
     names = [n for n in metric_names if n in pool[0]]
-    names = [n for n in names if any(np.isfinite(float(r.get(n, float("nan")))) for r in pool)]
+    names = [
+        n
+        for n in names
+        if any(np.isfinite(float(r.get(n, float("nan")))) for r in pool)
+    ]
     if not names:
         best = max(pool, key=lambda r: float(r.get("selection_score", 0.0)))
         return best, {
@@ -461,7 +465,9 @@ def optimize_thresholds(
     mode = (selection_mode or SELECTION_MODE_SINGLE).strip().lower()
     multi_meta: dict | None = None
     m_spec = (
-        multi_metrics_spec if multi_metrics_spec is not None else THRESHOLD_MULTI_METRICS
+        multi_metrics_spec
+        if multi_metrics_spec is not None
+        else THRESHOLD_MULTI_METRICS
     )
     if mode == SELECTION_MODE_MULTI_TOP_K and len(pool) > 0:
         metric_names = parse_multi_metric_names(m_spec)
