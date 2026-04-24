@@ -29,6 +29,15 @@ def _api_base() -> str:
     return os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
+def _trade_analysis_timeout_seconds() -> int:
+    raw = os.environ.get("TRADE_ANALYSIS_TIMEOUT_SECONDS", "180").strip()
+    try:
+        val = int(raw)
+    except ValueError:
+        return 180
+    return max(5, min(900, val))
+
+
 def _get(path: str, timeout: int = 60) -> dict[str, Any]:
     r = requests.get(f"{_api_base()}{path}", timeout=timeout)
     r.raise_for_status()
@@ -140,7 +149,11 @@ def main() -> None:
 
         if run_analysis and symbol:
             try:
-                analysis = _post("/trade-analysis", {"ticker": symbol})
+                analysis = _post(
+                    "/trade-analysis",
+                    {"ticker": symbol},
+                    timeout=_trade_analysis_timeout_seconds(),
+                )
                 st.subheader("Trade analysis")
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Adjusted score", f"{float(analysis['adjusted_score']):.4f}")

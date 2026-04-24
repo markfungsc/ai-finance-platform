@@ -933,3 +933,82 @@ def test_trade_analysis_llm_json_parser_and_fallback():
     assert out["adjustment"] == pytest.approx(0.10)
     with pytest.raises(ValueError):
         parse_llm_json(json.dumps({"conviction_score": 0.2}))
+
+
+def test_build_trade_analysis_qdrant_success_adds_ids_and_diagnostics():
+    from ml.inference import trade_analysis as ta
+
+    news_df = pd.DataFrame({"id": [101], "title": ["NVDA demand stays strong"]})
+    with patch.object(ta, "fetch_recent_clean_news", return_value=news_df), patch.object(
+        ta,
+        "retrieve_similar_news_payloads_with_meta",
+        return_value={
+            "hits": [{"article_id": 52371}, {"article_id": 52403}],
+            "hit_count": 2,
+            "error": None,
+        },
+    ):
+        out = ta.build_trade_analysis(
+            ticker="NVDA",
+            model_probability=0.62,
+            threshold_used=0.5,
+            sentiment_score=0.2,
+            technical_summary=["MACD bullish"],
+        )
+
+    refs = out["grounding_refs"]
+    assert refs["qdrant_article_ids"] == ["52371", "52403"]
+    assert refs["qdrant_hit_count"] == 2
+    assert refs["qdrant_error"] is None
+
+
+def test_build_trade_analysis_qdrant_empty_is_not_error():
+    from ml.inference import trade_analysis as ta
+
+    with patch.object(
+        ta, "fetch_recent_clean_news", return_value=pd.DataFrame(columns=["id", "title"])
+    ), patch.object(
+        ta,
+        "retrieve_similar_news_payloads_with_meta",
+        return_value={"hits": [], "hit_count": 0, "error": None},
+    ):
+        out = ta.build_trade_analysis(
+            ticker="NVDA",
+            model_probability=0.40,
+            threshold_used=0.5,
+            sentiment_score=0.0,
+            technical_summary=[],
+        )
+
+    refs = out["grounding_refs"]
+    assert refs["qdrant_article_ids"] == []
+    assert refs["qdrant_hit_count"] == 0
+    assert refs["qdrant_error"] is None
+
+
+def test_build_trade_analysis_qdrant_failure_sets_error_diagnostic():
+    from ml.inference import trade_analysis as ta
+
+    with patch.object(
+        ta, "fetch_recent_clean_news", return_value=pd.DataFrame(columns=["id", "title"])
+    ), patch.object(
+        ta,
+        "retrieve_similar_news_payloads_with_meta",
+        return_value={
+            "hits": [],
+            "hit_count": 0,
+            "error": "qdrant_query_failed:boom",
+        },
+    ):
+        out = ta.build_trade_analysis(
+            ticker="NVDA",
+            model_probability=0.40,
+            threshold_used=0.5,
+            sentiment_score=0.0,
+            technical_summary=[],
+        )
+
+    refs = out["grounding_refs"]
+    assert refs["qdrant_article_ids"] == []
+    assert refs["qdrant_hit_count"] == 0
+    assert refs["qdrant_error"] == "qdrant_query_failed:boom"

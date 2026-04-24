@@ -32,6 +32,8 @@ services:
       MODEL_PATH: /app/models/swing-trade/random_forest_pooled.pkl
       FEATURE_COLUMNS_PATH: /app/models/swing-trade/random_forest_pooled_feature_columns.pkl
       SP500_SYMBOLS_FILE: /app/data/universe/sp500_symbols.txt
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_NEWS_COLLECTION: news_chunks_v1
     volumes:
       - ../models:/app/models:ro
       - ../experiments:/app/experiments:ro

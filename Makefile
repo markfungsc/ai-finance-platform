@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup embed-news-qdrant embed-news-qdrant-all
+.PHONY: lint fmt up down logs migrate universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
 
 up:
 	cd infra && docker compose up -d
@@ -147,7 +147,16 @@ news-backfill-kaggle-dual-finbert:
 		--retry-max $${RETRY_MAX:-4}
 
 sentiment-rollup:
-	export PYTHONPATH=src && python src/ml/sentiment/rollup_daily.py
+	export PYTHONPATH=src && python src/ml/sentiment/rollup_daily.py \
+		--lookback-days $${LOOKBACK_DAYS:-90} \
+		--progress-every $${PROGRESS_EVERY:-25} \
+		--upsert-chunk-size $${UPSERT_CHUNK_SIZE:-2000}
+
+sentiment-rollup-full:
+	export PYTHONPATH=src && python src/ml/sentiment/rollup_daily.py \
+		--full \
+		--progress-every $${PROGRESS_EVERY:-25} \
+		--upsert-chunk-size $${UPSERT_CHUNK_SIZE:-2000}
 
 embed-news-qdrant:
 	@echo 'Usage: make embed-news-qdrant SYM=AAPL' && export PYTHONPATH=src && python src/ml/sentiment/embed_sync.py --symbol $${SYM:-AAPL}

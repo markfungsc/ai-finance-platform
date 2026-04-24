@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ from constants import TRAIN_SYMBOLS
 from database.news_queries import (
     fetch_clean_news_for_rollup,
     fetch_feature_days_for_symbol,
+    fetch_latest_daily_rollup_date_for_symbol,
     upsert_daily_symbol_sentiment_rows,
 )
 from log_config import get_logger
@@ -59,7 +61,13 @@ def load_clean_news() -> pd.DataFrame:
     return df.sort_values(["symbol", "published_at"]).reset_index(drop=True)
 
 
-def recompute_daily_rollups() -> int:
+def recompute_daily_rollups(
+    *,
+    full_recompute: bool = False,
+    lookback_days: int = 90,
+    progress_every: int = 25,
+    upsert_chunk_size: int = 2000,
+) -> int:
     df = load_clean_news()
     if df.empty:
         logger.info(
@@ -83,11 +91,42 @@ def recompute_daily_rollups() -> int:
         symbols = list(TRAIN_SYMBOLS)
 
     raw_rows: list[dict] = []
-    for sym in symbols:
+    t0 = time.perf_counter()
+    for idx, sym in enumerate(symbols, start=1):
         day_df = fetch_feature_days_for_symbol(sym)
         if day_df.empty:
+            if idx % max(1, progress_every) == 0:
+                elapsed = time.perf_counter() - t0
+                rate = idx / max(elapsed, 1e-6)
+                logger.info(
+                    "Rollup progress: symbols=%d/%d rows=%d rate=%.2f sym/s",
+                    idx,
+                    len(symbols),
+                    len(raw_rows),
+                    rate,
+                )
             continue
         day_df = day_df.sort_values("as_of_date").reset_index(drop=True)
+        if not full_recompute:
+            last_done = fetch_latest_daily_rollup_date_for_symbol(sym)
+            if last_done is not None:
+                cutoff = (
+                    pd.Timestamp(last_done)
+                    - pd.Timedelta(days=max(int(lookback_days), ROLL_WINDOW))
+                ).date()
+                day_df = day_df[day_df["as_of_date"] >= cutoff].reset_index(drop=True)
+                if day_df.empty:
+                    if idx % max(1, progress_every) == 0:
+                        elapsed = time.perf_counter() - t0
+                        rate = idx / max(elapsed, 1e-6)
+                        logger.info(
+                            "Rollup progress: symbols=%d/%d rows=%d rate=%.2f sym/s",
+                            idx,
+                            len(symbols),
+                            len(raw_rows),
+                            rate,
+                        )
+                    continue
         sym_articles = df[df["symbol"] == sym]
 
         if sym_articles.empty:
@@ -137,6 +176,16 @@ def recompute_daily_rollups() -> int:
                     "article_count": article_count,
                 }
             )
+        if idx % max(1, progress_every) == 0:
+            elapsed = time.perf_counter() - t0
+            rate = idx / max(elapsed, 1e-6)
+            logger.info(
+                "Rollup progress: symbols=%d/%d rows=%d rate=%.2f sym/s",
+                idx,
+                len(symbols),
+                len(raw_rows),
+                rate,
+            )
 
     rdf = pd.DataFrame(raw_rows)
     if rdf.empty:
@@ -181,7 +230,7 @@ def recompute_daily_rollups() -> int:
                 }
             )
 
-    upsert_daily_symbol_sentiment_rows(out_rows)
+    upsert_daily_symbol_sentiment_rows(out_rows, chunk_size=upsert_chunk_size)
     logger.info("Upserted %d daily_symbol_sentiment rows", len(out_rows))
     return len(out_rows)
 
@@ -190,8 +239,36 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description="Recompute daily_symbol_sentiment gold table"
     )
-    ap.parse_args(argv)
-    recompute_daily_rollups()
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="Full recompute of all available feature days",
+    )
+    ap.add_argument(
+        "--lookback-days",
+        type=int,
+        default=90,
+        help="Incremental mode lookback window (minimum rolling window is enforced)",
+    )
+    ap.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="Log progress every N symbols",
+    )
+    ap.add_argument(
+        "--upsert-chunk-size",
+        type=int,
+        default=2000,
+        help="Batch size for sentiment upsert writes",
+    )
+    args = ap.parse_args(argv)
+    recompute_daily_rollups(
+        full_recompute=bool(args.full),
+        lookback_days=int(args.lookback_days),
+        progress_every=int(args.progress_every),
+        upsert_chunk_size=int(args.upsert_chunk_size),
+    )
 
 
 if __name__ == "__main__":

@@ -62,6 +62,20 @@ def fetch_feature_days_for_symbol(symbol: str) -> pd.DataFrame:
         return pd.read_sql_query(q, conn, params={"symbol": symbol.upper()})
 
 
+def fetch_latest_daily_rollup_date_for_symbol(symbol: str):
+    """Return latest rolled-up day for one symbol, or None."""
+    q = text("""
+        SELECT MAX(as_of_date) AS max_as_of_date
+        FROM daily_symbol_sentiment
+        WHERE symbol = :symbol
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(q, {"symbol": symbol.upper()}).first()
+    if row is None:
+        return None
+    return row[0]
+
+
 def fetch_clean_news_text_for_embedding(symbol: str) -> pd.DataFrame:
     """Return rows needed to embed clean news into vector stores."""
     q = text("""
@@ -186,7 +200,7 @@ def fetch_daily_symbol_sentiment_df() -> pd.DataFrame:
         return pd.read_sql_query(q, conn)
 
 
-def upsert_daily_symbol_sentiment_rows(rows: list[dict]) -> None:
+def upsert_daily_symbol_sentiment_rows(rows: list[dict], *, chunk_size: int = 2000) -> None:
     """rows: z=news_sentiment_mean_z; horizon cols are rolling z; news_volume is rolling z of log1p(raw 24h count)."""
     if not rows:
         return
@@ -223,9 +237,10 @@ def upsert_daily_symbol_sentiment_rows(rows: list[dict]) -> None:
             article_count = EXCLUDED.article_count,
             updated_at = NOW()
     """)
+    n = max(1, int(chunk_size))
     with engine.begin() as conn:
-        for r in rows:
-            conn.execute(q, r)
+        for i in range(0, len(rows), n):
+            conn.execute(q, rows[i : i + n])
 
 
 def delete_daily_symbol_sentiment_for_symbol(symbol: str) -> None:

@@ -9,7 +9,7 @@ from typing import Any
 
 from database.news_queries import fetch_recent_clean_news
 from log_config import get_logger
-from ml.sentiment.qdrant_store import retrieve_similar_news_payloads
+from ml.sentiment.qdrant_store import retrieve_similar_news_payloads_with_meta
 
 logger = get_logger(__name__)
 
@@ -80,15 +80,18 @@ def build_trade_analysis(
         str(r.get("title", "")).strip() for r in symbol_rows[:3] if str(r.get("title", "")).strip()
     ) or "No recent symbol headlines."
 
-    qdrant_hits = retrieve_similar_news_payloads(
+    retrieval = retrieve_similar_news_payloads_with_meta(
         symbol=ticker,
         query_text=f"{ticker} catalyst risk sentiment",
         top_k=max(1, int(top_k_news)),
     )
+    qdrant_hits = list(retrieval.get("hits") or [])
+    qdrant_hit_count = int(retrieval.get("hit_count") or 0)
+    qdrant_error = retrieval.get("error")
     qdrant_ids = [
         str(r.get("article_id")) for r in qdrant_hits if r.get("article_id") is not None
     ]
-    macro_news_summary = f"qdrant_hits={len(qdrant_hits)}"
+    macro_news_summary = f"qdrant_hits={qdrant_hit_count}"
 
     risk_flags: list[str] = []
     if sentiment_score < -0.35:
@@ -149,6 +152,8 @@ def build_trade_analysis(
         "grounding_refs": {
             "symbol_news_ids": symbol_ids,
             "qdrant_article_ids": qdrant_ids,
+            "qdrant_hit_count": qdrant_hit_count,
+            "qdrant_error": str(qdrant_error) if qdrant_error else None,
             "as_of_utc": as_of.isoformat(),
         },
         "insufficient_evidence": bool(insufficient),

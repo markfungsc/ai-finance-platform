@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import os
 
 from log_config import get_logger
@@ -11,6 +12,9 @@ logger = get_logger(__name__)
 DEFAULT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 DEFAULT_COLLECTION = os.getenv("QDRANT_NEWS_COLLECTION", "news_chunks_v1")
 DEFAULT_VECTOR_SIZE = int(os.getenv("QDRANT_VECTOR_SIZE", "384"))
+DEFAULT_EMBED_MODEL = os.getenv(
+    "QDRANT_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
 def get_client():
@@ -19,6 +23,15 @@ def get_client():
     except ImportError as e:  # pragma: no cover
         raise ImportError("Install qdrant-client (see requirements.txt)") from e
     return QdrantClient(url=DEFAULT_URL)
+
+
+@lru_cache(maxsize=1)
+def _get_embed_model():
+    """Load and memoize embedding model once per process."""
+    from sentence_transformers import SentenceTransformer
+
+    logger.info("Loading embedding model for retrieval: %s", DEFAULT_EMBED_MODEL)
+    return SentenceTransformer(DEFAULT_EMBED_MODEL)
 
 
 def ensure_news_collection(
@@ -41,26 +54,26 @@ def ensure_news_collection(
     return c
 
 
-def retrieve_similar_news_payloads(
+def retrieve_similar_news_payloads_with_meta(
     *,
     symbol: str,
     query_text: str,
     top_k: int = 5,
     collection_name: str = DEFAULT_COLLECTION,
-) -> list[dict]:
+) -> dict:
     """Retrieve similar news chunk payloads from Qdrant.
 
-    Returns empty list on any missing dependency/runtime failure so callers
-    can gracefully fallback to deterministic behavior.
+    Returns a structured payload with:
+      - hits: list[dict]
+      - hit_count: int
+      - error: str | None
+
+    Runtime/dependency failures do not raise; they are captured in `error` so
+    callers can preserve deterministic fallbacks while exposing diagnostics.
     """
     try:
-        from sentence_transformers import SentenceTransformer
-    except Exception:
-        logger.debug("sentence-transformers unavailable; skipping qdrant retrieval")
-        return []
-    try:
         client = get_client()
-        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        model = _get_embed_model()
         vec = model.encode(query_text, normalize_embeddings=True).tolist()
         filt = {"must": [{"key": "symbol", "match": {"value": symbol.upper()}}]}
         # qdrant-client renamed search/query APIs across versions; support both.
@@ -88,7 +101,24 @@ def retrieve_similar_news_payloads(
                 if score is not None:
                     row["score"] = float(score)
                 out.append(row)
-        return out
-    except Exception:
+        return {"hits": out, "hit_count": len(out), "error": None}
+    except Exception as e:
         logger.debug("qdrant retrieval failed for symbol=%s", symbol, exc_info=True)
-        return []
+        return {"hits": [], "hit_count": 0, "error": f"qdrant_query_failed:{e}"}
+
+
+def retrieve_similar_news_payloads(
+    *,
+    symbol: str,
+    query_text: str,
+    top_k: int = 5,
+    collection_name: str = DEFAULT_COLLECTION,
+) -> list[dict]:
+    """Backward-compatible wrapper returning only the hit payload list."""
+    result = retrieve_similar_news_payloads_with_meta(
+        symbol=symbol,
+        query_text=query_text,
+        top_k=top_k,
+        collection_name=collection_name,
+    )
+    return list(result.get("hits") or [])
