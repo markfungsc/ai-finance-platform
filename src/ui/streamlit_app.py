@@ -151,7 +151,7 @@ def main() -> None:
             try:
                 analysis = _post(
                     "/trade-analysis",
-                    {"ticker": symbol},
+                    {"ticker": symbol, "refresh_news": True},
                     timeout=_trade_analysis_timeout_seconds(),
                 )
                 st.subheader("Trade analysis")

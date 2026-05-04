@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import time
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
@@ -22,6 +23,12 @@ from universe.resolve import resolve_ingestion_universe
 logger = get_logger(__name__)
 
 
+def _refresh_finbert_default_from_env() -> bool:
+    """FinBERT on for trade-analysis refresh unless env explicitly disables it."""
+    v = os.getenv("TRADE_ANALYSIS_NEWS_SCORE_FINBERT", "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def _score_fn_or_none(score_finbert: bool):
     if not score_finbert:
         return None
@@ -35,10 +42,13 @@ def _score_fn_or_none(score_finbert: bool):
     return score_fn
 
 
-def _ingest_items(items, *, source: str, score_finbert: bool) -> tuple[int, int]:
-    """Returns (raw_upserts, clean_inserts_attempted)."""
+def _ingest_items(
+    items, *, source: str, score_finbert: bool
+) -> tuple[int, int, list[int]]:
+    """Returns (raw_upserts, clean_inserts_attempted, clean_article_ids in ingest order)."""
     n_raw = 0
     n_clean = 0
+    clean_ids: list[int] = []
     finbert_scalar = None
     score_fn = _score_fn_or_none(score_finbert)
 
@@ -63,11 +73,14 @@ def _ingest_items(items, *, source: str, score_finbert: bool) -> tuple[int, int]
             finbert_scalar=finbert_scalar,
         )
         n_clean += 1
+        clean_ids.append(int(cid))
         logger.debug("clean id=%s symbol=%s", cid, item.symbol)
-    return n_raw, n_clean
+    return n_raw, n_clean, clean_ids
 
 
-def ingest_symbol_yfinance(symbol: str, *, score_finbert: bool) -> tuple[int, int]:
+def ingest_symbol_yfinance(
+    symbol: str, *, score_finbert: bool
+) -> tuple[int, int, list[int]]:
     return _ingest_items(
         iter_yfinance_news(symbol), source="yfinance", score_finbert=score_finbert
     )
@@ -79,7 +92,7 @@ def ingest_symbol_gdelt(
     start_date: date,
     end_date: date,
     score_finbert: bool,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[int]]:
     return _ingest_items(
         iter_gdelt_news(symbol, start_date=start_date, end_date=end_date),
         source="gdelt",
@@ -93,7 +106,7 @@ def ingest_symbol_sec(
     start_date: date,
     end_date: date,
     score_finbert: bool,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[int]]:
     return _ingest_items(
         iter_sec_news(symbol, start_date=start_date, end_date=end_date),
         source="sec",
@@ -208,6 +221,186 @@ async def _fetch_items_async(
     }
 
 
+async def _ingest_gap_fetch_and_write(
+    symbol: str,
+    *,
+    provider: str,
+    start_date: date,
+    end_date: date,
+    score_finbert: bool,
+    request_timeout: float,
+    retry_max: int,
+) -> tuple[int, int, dict, list[int]]:
+    sem = asyncio.Semaphore(1)
+    async with httpx.AsyncClient() as client:
+        items, m = await _fetch_items_async(
+            symbol,
+            provider=provider,
+            start_date=start_date,
+            end_date=end_date,
+            client=client,
+            sem=sem,
+            request_timeout=request_timeout,
+            retry_max=retry_max,
+        )
+        source = "yfinance" if provider == "yfinance" else provider
+        raw, clean, clean_ids = await asyncio.to_thread(
+            _ingest_items, items, source=source, score_finbert=score_finbert
+        )
+    return raw, clean, m, clean_ids
+
+
+def _embed_qdrant_after_refresh_requested(
+    embed_new_news_in_qdrant: bool | None,
+    *,
+    default_on_when_unset: bool = False,
+) -> bool:
+    if embed_new_news_in_qdrant is True:
+        return True
+    if embed_new_news_in_qdrant is False:
+        return False
+    if default_on_when_unset:
+        v = os.getenv("TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH", "").strip().lower()
+        if v in ("0", "false", "no", "off"):
+            return False
+        return True
+    return os.getenv("TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def refresh_symbol_news_gap(
+    symbol: str,
+    *,
+    news_lookback_days: int = 7,
+    provider: str | None = None,
+    score_finbert: bool | None = None,
+    embed_new_news_in_qdrant: bool | None = None,
+    default_qdrant_embed_on_unset: bool = False,
+) -> dict[str, object]:
+    """Fetch external news since the newest row in ``clean_news_articles`` (capped by lookback).
+
+    When ``provider`` is omitted, uses ``TRADE_ANALYSIS_NEWS_PROVIDER`` (``yfinance``,
+    ``gdelt``, ``sec``, or ``hybrid``; default ``yfinance``).
+
+    FinBERT: when ``score_finbert`` is ``None``, scoring defaults to **on** unless
+    ``TRADE_ANALYSIS_NEWS_SCORE_FINBERT`` is ``0``, ``false``, ``no``, or ``off``.
+    Pass ``score_finbert=True``/``False`` to override env.
+
+    Qdrant: if ``default_qdrant_embed_on_unset`` is true (``/trade-analysis`` refresh path), newly
+    ingested rows are embedded unless ``embed_new_news_in_qdrant=False`` or env
+    ``TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH`` is ``0``/``false``/``no``/``off``.
+    Otherwise embed only when ``embed_new_news_in_qdrant=True`` or that env is ``1``/``true``/``yes``.
+    """
+    sym = symbol.strip().upper()
+    if not sym:
+        return {"error": "empty_symbol", "provider": None, "finbert_scored": False}
+
+    resolved = (
+        (provider or os.getenv("TRADE_ANALYSIS_NEWS_PROVIDER", "yfinance"))
+        .strip()
+        .lower()
+    )
+    if resolved not in ("yfinance", "gdelt", "sec", "hybrid"):
+        resolved = "yfinance"
+
+    if score_finbert is None:
+        score_finbert = _refresh_finbert_default_from_env()
+
+    from database.news_queries import fetch_max_published_at_clean_news
+
+    latest = fetch_max_published_at_clean_news(sym)
+    end_d = datetime.now(tz=UTC).date()
+    lb = max(1, min(int(news_lookback_days), 60))
+
+    if latest is not None:
+        if hasattr(latest, "to_pydatetime"):
+            latest_dt = latest.to_pydatetime()
+        else:
+            latest_dt = latest
+        if getattr(latest_dt, "tzinfo", None) is None:
+            latest_dt = latest_dt.replace(tzinfo=UTC)
+        else:
+            latest_dt = latest_dt.astimezone(UTC)
+        start_d = latest_dt.date()
+    else:
+        start_d = end_d - timedelta(days=lb)
+
+    if (end_d - start_d).days > lb:
+        start_d = end_d - timedelta(days=lb)
+
+    meta: dict[str, object] = {
+        "provider": resolved,
+        "start_date": start_d.isoformat(),
+        "end_date": end_d.isoformat(),
+        "raw_upserts": 0,
+        "clean_inserts": 0,
+        "fetched": 0,
+        "error": None,
+        "finbert_scored": bool(score_finbert),
+    }
+    try:
+        req_timeout = float(
+            os.getenv("TRADE_ANALYSIS_NEWS_REQUEST_TIMEOUT", "30").strip()
+        )
+    except ValueError:
+        req_timeout = 30.0
+    try:
+        retry_max = int(os.getenv("TRADE_ANALYSIS_NEWS_RETRY_MAX", "4").strip())
+    except ValueError:
+        retry_max = 4
+
+    clean_article_ids: list[int] = []
+    try:
+        if resolved == "yfinance":
+            raw, clean, clean_article_ids = ingest_symbol_yfinance(
+                sym, score_finbert=score_finbert
+            )
+            meta["raw_upserts"] = int(raw)
+            meta["clean_inserts"] = int(clean)
+            meta["fetched"] = int(raw)
+        else:
+            raw, clean, m, clean_article_ids = asyncio.run(
+                _ingest_gap_fetch_and_write(
+                    sym,
+                    provider=resolved,
+                    start_date=start_d,
+                    end_date=end_d,
+                    score_finbert=score_finbert,
+                    request_timeout=req_timeout,
+                    retry_max=retry_max,
+                )
+            )
+            meta["raw_upserts"] = int(raw)
+            meta["clean_inserts"] = int(clean)
+            meta["fetched"] = int(m.get("fetched", 0))
+        if clean_article_ids:
+            meta["ingested_clean_article_ids"] = list(clean_article_ids)
+    except Exception as e:
+        logger.exception("refresh_symbol_news_gap failed symbol=%s", sym)
+        meta["error"] = str(e)
+        return meta
+
+    if clean_article_ids and _embed_qdrant_after_refresh_requested(
+        embed_new_news_in_qdrant,
+        default_on_when_unset=default_qdrant_embed_on_unset,
+    ):
+        try:
+            from ml.sentiment.embed_sync import embed_and_upsert_article_ids
+
+            n_pts = embed_and_upsert_article_ids(sym, clean_article_ids)
+            meta["qdrant_points_upserted"] = int(n_pts)
+        except Exception as embed_exc:
+            logger.exception(
+                "qdrant incremental embed after news refresh failed symbol=%s", sym
+            )
+            meta["qdrant_embed_error"] = str(embed_exc)
+            meta["qdrant_points_upserted"] = 0
+    return meta
+
+
 async def _heartbeat_loop(state: dict, every_s: int) -> None:
     while not state.get("done"):
         await asyncio.sleep(max(1, every_s))
@@ -255,7 +448,7 @@ async def _process_symbol(
         )
         # DB writes and optional model inference can block; offload to thread.
         source = "yfinance" if args.provider == "yfinance" else args.provider
-        raw, inserted = await asyncio.to_thread(
+        raw, inserted, _clean_ids = await asyncio.to_thread(
             _ingest_items, items, source=source, score_finbert=score_finbert
         )
         elapsed = time.time() - ts0

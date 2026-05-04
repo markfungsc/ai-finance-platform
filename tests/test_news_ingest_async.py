@@ -1,6 +1,7 @@
 import asyncio
 import time
-from datetime import date
+from datetime import UTC, date, datetime
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -131,3 +132,156 @@ def test_fetch_items_async_kaggle_dual_path(tmp_path):
     items, metrics = asyncio.run(_run())
     assert len(items) == 2
     assert metrics["kept"] == 2
+
+
+def test_refresh_symbol_news_gap_yfinance_invokes_ingest():
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(ingest, "ingest_symbol_yfinance", return_value=(4, 3, [101, 102])) as yfin,
+    ):
+        meta = ingest.refresh_symbol_news_gap(
+            "nvda", news_lookback_days=5, provider="yfinance", score_finbert=False
+        )
+        yfin.assert_called_once_with("NVDA", score_finbert=False)
+    assert meta["provider"] == "yfinance"
+    assert meta["raw_upserts"] == 4
+    assert meta["clean_inserts"] == 3
+    assert meta["fetched"] == 4
+    assert meta["error"] is None
+    assert meta["end_date"] == date.today().isoformat()
+    assert meta.get("finbert_scored") is False
+
+
+def test_refresh_symbol_news_gap_start_date_from_latest_row():
+    latest = datetime(2026, 4, 20, 15, 0, 0, tzinfo=UTC)
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=latest,
+        ),
+        patch.object(ingest, "ingest_symbol_yfinance", return_value=(1, 1, [55])),
+    ):
+        meta = ingest.refresh_symbol_news_gap(
+            "NVDA", news_lookback_days=30, provider="yfinance", score_finbert=False
+        )
+    assert meta["start_date"] == "2026-04-20"
+
+
+def test_refresh_symbol_news_gap_defaults_finbert_on(monkeypatch):
+    monkeypatch.delenv("TRADE_ANALYSIS_NEWS_SCORE_FINBERT", raising=False)
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(ingest, "ingest_symbol_yfinance", return_value=(1, 1, [9])) as yfin,
+    ):
+        meta = ingest.refresh_symbol_news_gap("X", news_lookback_days=3, provider="yfinance")
+        yfin.assert_called_once_with("X", score_finbert=True)
+    assert meta.get("finbert_scored") is True
+
+
+def test_refresh_symbol_news_gap_env_can_disable_finbert(monkeypatch):
+    monkeypatch.setenv("TRADE_ANALYSIS_NEWS_SCORE_FINBERT", "false")
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(ingest, "ingest_symbol_yfinance", return_value=(1, 1, [9])) as yfin,
+    ):
+        meta = ingest.refresh_symbol_news_gap("X", news_lookback_days=3, provider="yfinance")
+        yfin.assert_called_once_with("X", score_finbert=False)
+    assert meta.get("finbert_scored") is False
+
+
+def test_refresh_symbol_news_gap_calls_qdrant_embed_when_flag_true(monkeypatch):
+    monkeypatch.delenv("TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH", raising=False)
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(
+            ingest, "ingest_symbol_yfinance", return_value=(1, 1, [100, 101])
+        ),
+        patch(
+            "ml.sentiment.embed_sync.embed_and_upsert_article_ids", return_value=4
+        ) as emb,
+    ):
+        meta = ingest.refresh_symbol_news_gap(
+            "ZZ",
+            news_lookback_days=3,
+            provider="yfinance",
+            embed_new_news_in_qdrant=True,
+        )
+    emb.assert_called_once_with("ZZ", [100, 101])
+    assert meta.get("qdrant_points_upserted") == 4
+    assert meta.get("ingested_clean_article_ids") == [100, 101]
+
+
+def test_refresh_symbol_news_gap_skips_qdrant_embed_by_default(monkeypatch):
+    monkeypatch.delenv("TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH", raising=False)
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(
+            ingest, "ingest_symbol_yfinance", return_value=(1, 1, [100])
+        ),
+        patch("ml.sentiment.embed_sync.embed_and_upsert_article_ids") as emb,
+    ):
+        meta = ingest.refresh_symbol_news_gap("ZZ", news_lookback_days=3, provider="yfinance")
+    emb.assert_not_called()
+    assert "qdrant_points_upserted" not in meta
+
+
+def test_refresh_symbol_news_gap_embeds_when_trade_analysis_default(monkeypatch):
+    """Same as /trade-analysis: default_qdrant_embed_on_unset embeds without env."""
+    monkeypatch.delenv("TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH", raising=False)
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(
+            ingest, "ingest_symbol_yfinance", return_value=(1, 1, [200, 201])
+        ),
+        patch(
+            "ml.sentiment.embed_sync.embed_and_upsert_article_ids", return_value=3
+        ) as emb,
+    ):
+        meta = ingest.refresh_symbol_news_gap(
+            "AA",
+            news_lookback_days=3,
+            provider="yfinance",
+            default_qdrant_embed_on_unset=True,
+        )
+    emb.assert_called_once_with("AA", [200, 201])
+    assert meta.get("qdrant_points_upserted") == 3
+
+
+def test_refresh_trade_analysis_default_respects_qdrant_embed_env_off(monkeypatch):
+    monkeypatch.setenv("TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH", "false")
+    with (
+        patch(
+            "database.news_queries.fetch_max_published_at_clean_news",
+            return_value=None,
+        ),
+        patch.object(
+            ingest, "ingest_symbol_yfinance", return_value=(1, 1, [300])
+        ),
+        patch("ml.sentiment.embed_sync.embed_and_upsert_article_ids") as emb,
+    ):
+        meta = ingest.refresh_symbol_news_gap(
+            "BB",
+            news_lookback_days=3,
+            provider="yfinance",
+            default_qdrant_embed_on_unset=True,
+        )
+    emb.assert_not_called()
+    assert "qdrant_points_upserted" not in meta

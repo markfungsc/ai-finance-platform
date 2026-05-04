@@ -7,6 +7,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from data_pipeline.news.ingest import refresh_symbol_news_gap
 from database.news_queries import fetch_recent_clean_news
 from log_config import get_logger
 from ml.sentiment.qdrant_store import retrieve_similar_news_payloads_with_meta
@@ -67,8 +68,27 @@ def build_trade_analysis(
     market_regime: str | None = None,
     top_k_news: int = 6,
     news_lookback_days: int = 7,
+    refresh_news: bool = False,
+    score_news_with_finbert: bool | None = None,
+    embed_new_news_in_qdrant: bool | None = None,
 ) -> dict[str, Any]:
     as_of = datetime.now(tz=UTC)
+    news_refresh_meta: dict[str, Any] | None = None
+    if refresh_news:
+        try:
+            news_refresh_meta = dict(
+                refresh_symbol_news_gap(
+                    ticker,
+                    news_lookback_days=max(1, int(news_lookback_days)),
+                    score_finbert=score_news_with_finbert,
+                    embed_new_news_in_qdrant=embed_new_news_in_qdrant,
+                    default_qdrant_embed_on_unset=True,
+                )
+            )
+        except Exception:
+            logger.exception("trade_analysis news refresh failed ticker=%s", ticker)
+            news_refresh_meta = {"error": "refresh_exception"}
+
     news_df = fetch_recent_clean_news(
         ticker,
         since_utc=as_of - timedelta(days=max(1, int(news_lookback_days))),
@@ -170,6 +190,7 @@ def build_trade_analysis(
             "qdrant_hit_count": qdrant_hit_count,
             "qdrant_error": str(qdrant_error) if qdrant_error else None,
             "as_of_utc": as_of.isoformat(),
+            "news_refresh": news_refresh_meta,
         },
         "insufficient_evidence": bool(insufficient),
         "confidence": float(0.35 if insufficient else 0.7),

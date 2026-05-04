@@ -174,6 +174,18 @@ class TradeAnalysisRequest(BaseModel):
     market_regime: str | None = None
     top_k_news: int = Field(default=6, ge=1, le=25)
     news_lookback_days: int = Field(default=7, ge=1, le=60)
+    refresh_news: bool = Field(
+        default=False,
+        description="If true, ingest external news since the newest DB row (capped by news_lookback_days) before reading headlines.",
+    )
+    score_news_with_finbert: bool | None = Field(
+        default=None,
+        description="If set, force FinBERT on/off for that ingest. If null, use TRADE_ANALYSIS_NEWS_SCORE_FINBERT (default: on unless disabled).",
+    )
+    embed_new_news_in_qdrant: bool | None = Field(
+        default=None,
+        description="If false, skip Qdrant embed after refresh. If true, force embed. If null, embed by default unless TRADE_ANALYSIS_EMBED_QDRANT_ON_REFRESH disables (false/no/off).",
+    )
 
 
 class TradeAnalysisResponse(BaseModel):
@@ -896,6 +908,9 @@ def trade_analysis(body: TradeAnalysisRequest):
         market_regime=body.market_regime,
         top_k_news=body.top_k_news,
         news_lookback_days=body.news_lookback_days,
+        refresh_news=body.refresh_news,
+        score_news_with_finbert=body.score_news_with_finbert,
+        embed_new_news_in_qdrant=body.embed_new_news_in_qdrant,
     )
     return TradeAnalysisResponse(**result)
 

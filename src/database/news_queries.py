@@ -11,6 +11,22 @@ from sqlalchemy import text
 from database.connection import engine
 
 
+def fetch_max_published_at_clean_news(symbol: str):
+    """Latest ``published_at`` for a symbol in clean news, or None if no rows."""
+    q = text(
+        """
+        SELECT MAX(published_at) AS max_pub
+        FROM clean_news_articles
+        WHERE symbol = :symbol
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(q, {"symbol": symbol.upper()}).first()
+    if row is None or row[0] is None:
+        return None
+    return row[0]
+
+
 def fetch_recent_clean_news(
     symbol: str,
     *,

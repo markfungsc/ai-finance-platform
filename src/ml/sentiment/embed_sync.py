@@ -36,9 +36,97 @@ def _point_id(article_id: int, chunk_idx: int) -> int:
     return article_id * 10_000 + chunk_idx
 
 
+def _rows_to_points(
+    df: pd.DataFrame,
+    model,
+    *,
+    symbol_upper: str,
+    collection_model_name: str = MODEL_NAME,
+) -> list:
+    """Build Qdrant PointStruct list from clean_news rows (id, title, summary)."""
+    from qdrant_client.models import PointStruct
+
+    points = []
+    for row in df.itertuples(index=False):
+        text_in = f"{row.title}. {row.summary}".strip()
+        for ci, ch in enumerate(_chunks(text_in)):
+            pid = _point_id(int(row.id), ci)
+            vec = model.encode(ch, normalize_embeddings=True)
+            if isinstance(vec, np.ndarray):
+                vec = vec.tolist()
+            points.append(
+                PointStruct(
+                    id=pid,
+                    vector=vec,
+                    payload={
+                        "article_id": int(row.id),
+                        "chunk_idx": ci,
+                        "symbol": symbol_upper,
+                        "model": collection_model_name,
+                    },
+                )
+            )
+    return points
+
+
+def embed_and_upsert_article_ids(
+    symbol: str,
+    article_ids: list[int],
+    *,
+    collection_name: str | None = None,
+) -> int:
+    """Embed only the given ``clean_news_articles.id`` rows for ``symbol`` and upsert to Qdrant.
+
+    Returns number of vector points upserted (chunks; may exceed len(article_ids)).
+    """
+    sym = symbol.strip().upper()
+    ids_int = sorted({int(x) for x in article_ids if x is not None})
+    if not sym or not ids_int:
+        return 0
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as e:
+        raise ImportError(
+            "Install: pip install qdrant-client sentence-transformers (add to requirements-nlp.txt)"
+        ) from e
+
+    in_clause = ",".join(str(i) for i in ids_int)
+    q = text(f"""
+        SELECT id, title, summary
+        FROM clean_news_articles
+        WHERE symbol = :symbol AND id IN ({in_clause})
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(q, conn, params={"symbol": sym})
+    if df.empty:
+        return 0
+
+    model = SentenceTransformer(MODEL_NAME)
+    dim = model.get_sentence_embedding_dimension()
+    if dim != DEFAULT_VECTOR_SIZE:
+        logger.warning(
+            "Model dim %s != DEFAULT_VECTOR_SIZE %s", dim, DEFAULT_VECTOR_SIZE
+        )
+
+    client = get_client()
+    ensure_news_collection(client, vector_size=dim)
+    points = _rows_to_points(df, model, symbol_upper=sym)
+    if not points:
+        return 0
+
+    coll = collection_name or DEFAULT_COLLECTION
+    batch = 64
+    for i in range(0, len(points), batch):
+        client.upsert(collection_name=coll, points=points[i : i + batch])
+    logger.info(
+        "Upserted %s Qdrant points for %s (article_ids=%s)", len(points), sym, ids_int
+    )
+    return len(points)
+
+
 def embed_and_upsert_symbol(symbol: str, *, limit: int | None = None) -> int:
     try:
-        from qdrant_client.models import PointStruct
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
         raise ImportError(
@@ -68,26 +156,7 @@ def embed_and_upsert_symbol(symbol: str, *, limit: int | None = None) -> int:
     client = get_client()
     ensure_news_collection(client, vector_size=dim)
 
-    points = []
-    for row in df.itertuples(index=False):
-        text_in = f"{row.title}. {row.summary}".strip()
-        for ci, ch in enumerate(_chunks(text_in)):
-            pid = _point_id(int(row.id), ci)
-            vec = model.encode(ch, normalize_embeddings=True)
-            if isinstance(vec, np.ndarray):
-                vec = vec.tolist()
-            points.append(
-                PointStruct(
-                    id=pid,
-                    vector=vec,
-                    payload={
-                        "article_id": int(row.id),
-                        "chunk_idx": ci,
-                        "symbol": symbol.upper(),
-                        "model": MODEL_NAME,
-                    },
-                )
-            )
+    points = _rows_to_points(df, model, symbol_upper=symbol.upper())
 
     batch = 64
     for i in range(0, len(points), batch):

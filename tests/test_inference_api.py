@@ -960,6 +960,42 @@ def test_build_trade_analysis_qdrant_success_adds_ids_and_diagnostics():
     assert refs["qdrant_article_ids"] == ["52371", "52403"]
     assert refs["qdrant_hit_count"] == 2
     assert refs["qdrant_error"] is None
+    assert refs.get("news_refresh") is None
+
+
+def test_build_trade_analysis_refresh_news_invokes_gap_refresh():
+    from unittest.mock import patch
+
+    from ml.inference import trade_analysis as ta
+
+    news_df = pd.DataFrame({"id": [101], "title": ["NVDA demand stays strong"]})
+
+    def _fake_gap(sym, *, news_lookback_days=7, provider=None, score_finbert=None, **kwargs):
+        assert sym == "NVDA"
+        assert news_lookback_days == 14
+        return {"provider": "yfinance", "fetched": 2, "error": None}
+
+    with (
+        patch.object(ta, "refresh_symbol_news_gap", side_effect=_fake_gap) as gap,
+        patch.object(ta, "fetch_recent_clean_news", return_value=news_df),
+        patch.object(
+            ta,
+            "retrieve_similar_news_payloads_with_meta",
+            return_value={"hits": [], "hit_count": 0, "error": None},
+        ),
+    ):
+        out = ta.build_trade_analysis(
+            ticker="NVDA",
+            model_probability=0.62,
+            threshold_used=0.5,
+            sentiment_score=0.2,
+            technical_summary=["MACD bullish"],
+            refresh_news=True,
+            news_lookback_days=14,
+        )
+
+    gap.assert_called_once()
+    assert out["grounding_refs"]["news_refresh"]["fetched"] == 2
 
 
 def test_build_trade_analysis_qdrant_empty_is_not_error():
