@@ -156,18 +156,25 @@ def test_refresh_symbol_news_gap_yfinance_invokes_ingest():
 
 
 def test_refresh_symbol_news_gap_start_date_from_latest_row():
-    latest = datetime(2026, 4, 20, 15, 0, 0, tzinfo=UTC)
+    latest = datetime(2026, 5, 1, 15, 0, 0, tzinfo=UTC)
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)  # 19 days after latest; within 30d lookback
+
     with (
         patch(
             "database.news_queries.fetch_max_published_at_clean_news",
             return_value=latest,
         ),
         patch.object(ingest, "ingest_symbol_yfinance", return_value=(1, 1, [55])),
+        patch("data_pipeline.news.ingest.datetime") as mock_dt,
     ):
+        mock_dt.now.return_value = fixed_now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
         meta = ingest.refresh_symbol_news_gap(
             "NVDA", news_lookback_days=30, provider="yfinance", score_finbert=False
         )
-    assert meta["start_date"] == "2026-04-20"
+    assert meta["start_date"] == "2026-05-01"
+    assert meta["end_date"] == "2026-05-20"
 
 
 def test_refresh_symbol_news_gap_defaults_finbert_on(monkeypatch):
