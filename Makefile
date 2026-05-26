@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
+.PHONY: lint fmt up down logs migrate migrate-url universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
 
 up:
 	cd infra && docker compose up -d
@@ -14,6 +14,10 @@ migrate:
 		echo Running $$f; \
 		cd infra && docker exec -i finance_postgres psql -U postgres -d ai_finance < $$f; \
 	done
+
+# Apply migrations via DATABASE_URL (local Postgres, RDS, etc.). See docs/DEPLOY_AWS_GITHUB.md Step 2.
+migrate-url:
+	python3 scripts/run_migrations.py
 
 # Fetch current S&P 500 tickers from Wikipedia → data/universe/sp500_symbols.txt
 universe-fetch-sp500:
