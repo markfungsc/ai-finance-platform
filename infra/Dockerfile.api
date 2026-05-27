@@ -1,3 +1,4 @@
+# Full API image including NLP stack (FinBERT). For local Compose; EC2 uses Dockerfile.api.slim.
 FROM python:3.12-slim
 
 WORKDIR /app
