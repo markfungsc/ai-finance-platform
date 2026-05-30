@@ -20,4 +20,10 @@ jobs:
       - name: Deploy API on EC2
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: bash /opt/ai-finance/app/scripts/deploy_ec2_api.sh
+        run: |
+          APP_DIR=/opt/ai-finance/app
+          if [ ! -f "$APP_DIR/scripts/deploy_ec2_api.sh" ]; then
+            git -C "$APP_DIR" fetch origin main
+            git -C "$APP_DIR" reset --hard origin/main
+          fi
+          bash "$APP_DIR/scripts/deploy_ec2_api.sh"
