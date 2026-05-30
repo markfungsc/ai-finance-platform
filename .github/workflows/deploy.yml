@@ -1,0 +1,23 @@
+# Deploy API on EC2 via self-hosted runner (git pull + docker rebuild/restart).
+# Requires Step 9 runner with labels: self-hosted, aws-ec2
+# See docs/DEPLOY_AWS_GITHUB.md Step 11
+
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, aws-ec2]
+    steps:
+      - name: Deploy API on EC2
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: bash /opt/ai-finance/app/scripts/deploy_ec2_api.sh
