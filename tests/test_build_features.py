@@ -1,9 +1,9 @@
 """Unit tests for data_pipeline.features.build_features."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
-import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,9 +12,9 @@ from data_pipeline.features.build_features import (
     _slice_symbols_from_start,
     _write_state,
     compute_features,
-    run_features_batch,
     rowwise_cross_sectional_zscore,
     run_feature_pipeline,
+    run_features_batch,
 )
 from database.queries import STOCK_FEATURES_VALUE_COLUMNS
 from ml.features import FEATURE_COLUMNS, FEATURE_COLUMNS_Z
