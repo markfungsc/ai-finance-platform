@@ -1,13 +1,18 @@
 """Unit tests for data_pipeline.features.build_features."""
 
+from pathlib import Path
 from unittest.mock import patch
 
+import json
 import numpy as np
 import pandas as pd
 import pytest
 
 from data_pipeline.features.build_features import (
+    _slice_symbols_from_start,
+    _write_state,
     compute_features,
+    run_features_batch,
     rowwise_cross_sectional_zscore,
     run_feature_pipeline,
 )
@@ -128,3 +133,85 @@ class TestRunFeaturePipeline:
         assert len(z_batch) == len(base_batch)
         assert "return_1d_z" in z_batch[0]
         assert "close_z" in z_batch[0]
+
+
+class TestSliceSymbolsFromStart:
+    def test_no_start_returns_all(self) -> None:
+        symbols = ["AAPL", "MSFT", "NVDA"]
+        assert _slice_symbols_from_start(symbols, None) == symbols
+
+    def test_start_at_slices_inclusive(self) -> None:
+        symbols = ["AAPL", "MSFT", "NVDA"]
+        assert _slice_symbols_from_start(symbols, "MSFT") == ["MSFT", "NVDA"]
+
+    def test_start_at_normalizes_case(self) -> None:
+        symbols = ["AAPL", "MSFT", "NVDA"]
+        assert _slice_symbols_from_start(symbols, "msft") == ["MSFT", "NVDA"]
+
+    def test_unknown_start_raises(self) -> None:
+        with pytest.raises(ValueError, match="not found in resolved universe"):
+            _slice_symbols_from_start(["AAPL", "MSFT"], "ZZZZ")
+
+
+class TestRunFeaturesBatch:
+    @patch("data_pipeline.features.build_features.run_feature_pipeline")
+    @patch(
+        "data_pipeline.features.build_features.resolve_ingestion_universe",
+        return_value=("subscriptions", ["AAPL", "MSFT", "NVDA"]),
+    )
+    def test_start_at_processes_subset(
+        self, _mock_universe: object, mock_pipeline: object, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        run_features_batch(
+            backfill=True,
+            start_at="MSFT",
+            state_file=state_file,
+        )
+        assert mock_pipeline.call_count == 2
+        mock_pipeline.assert_any_call("MSFT", backfill=True)
+        mock_pipeline.assert_any_call("NVDA", backfill=True)
+        assert not state_file.exists()
+
+    @patch("data_pipeline.features.build_features.run_feature_pipeline")
+    @patch(
+        "data_pipeline.features.build_features.resolve_ingestion_universe",
+        return_value=("subscriptions", ["AAPL", "MSFT"]),
+    )
+    def test_writes_checkpoint_before_each_symbol(
+        self, _mock_universe: object, mock_pipeline: object, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        seen_symbols: list[str] = []
+
+        def record_and_check(symbol: str, backfill: bool = False) -> None:
+            seen_symbols.append(symbol)
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            assert payload["symbol"] == symbol
+            assert payload["index"] == len(seen_symbols)
+            assert payload["total"] == 2
+            assert payload["universe"] == "subscriptions"
+
+        mock_pipeline.side_effect = record_and_check
+        run_features_batch(backfill=False, state_file=state_file)
+        assert seen_symbols == ["AAPL", "MSFT"]
+        assert not state_file.exists()
+
+
+class TestWriteState:
+    def test_writes_json_atomically(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "checkpoint.state"
+        _write_state(
+            state_file,
+            symbol="NVDA",
+            index=3,
+            total=10,
+            universe="sp500",
+        )
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+        assert payload["symbol"] == "NVDA"
+        assert payload["index"] == 3
+        assert payload["total"] == 10
+        assert payload["universe"] == "sp500"
+        assert "pid" in payload
+        assert "updated_at" in payload

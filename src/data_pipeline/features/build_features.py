@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+import argparse
+import json
 import os
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pandas as pd
 import ta
@@ -14,7 +20,9 @@ from database.queries import (
     upsert_features,
     upsert_features_z,
 )
-from universe.resolve import resolve_ingestion_symbols
+from universe.resolve import resolve_ingestion_universe
+
+DEFAULT_STATE_FILE = Path("/tmp/features-backfill.state")
 
 # Rows must be complete on these columns before upsert (matches stock_features INSERT).
 _STOCK_FEATURES_COLUMNS = ["symbol", "timestamp", *STOCK_FEATURES_VALUE_COLUMNS]
@@ -181,11 +189,121 @@ def run_feature_pipeline(symbol: str, backfill: bool = False) -> None:
     print(f"Total Features zscore count: {features_zscore_count}")
 
 
-if __name__ == "__main__":
-    backfill = os.environ.get("FEATURES_BACKFILL", "").strip().lower() in (
+def _slice_symbols_from_start(symbols: list[str], start_at: str | None) -> list[str]:
+    if not start_at:
+        return symbols
+    start = start_at.strip().upper()
+    if start not in symbols:
+        raise ValueError(f"start-at symbol not found in resolved universe: {start}")
+    return symbols[symbols.index(start) :]
+
+
+def _write_state(
+    state_file: Path | None,
+    *,
+    symbol: str,
+    index: int,
+    total: int,
+    universe: str,
+) -> None:
+    if state_file is None:
+        return
+    payload = {
+        "symbol": symbol,
+        "index": index,
+        "total": total,
+        "universe": universe,
+        "pid": os.getpid(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_file.with_suffix(state_file.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(state_file)
+
+
+def _clear_state(state_file: Path | None) -> None:
+    if state_file is None:
+        return
+    if state_file.exists():
+        state_file.unlink()
+
+
+def run_features_batch(
+    *,
+    backfill: bool = False,
+    start_at: str | None = None,
+    progress_every: int = 1,
+    state_file: Path | None = DEFAULT_STATE_FILE,
+) -> None:
+    universe_mode, all_symbols = resolve_ingestion_universe()
+    symbols = _slice_symbols_from_start(all_symbols, start_at)
+    total = len(symbols)
+    if not symbols:
+        print("No symbols to process")
+        return
+
+    progress_every = max(1, int(progress_every))
+    for idx, sym in enumerate(symbols, start=1):
+        _write_state(
+            state_file,
+            symbol=sym,
+            index=idx,
+            total=total,
+            universe=universe_mode,
+        )
+        if idx == 1 or idx == total or idx % progress_every == 0:
+            print(f"[{idx}/{total}] Building features for {sym}", flush=True)
+        run_feature_pipeline(sym, backfill=backfill)
+        if idx == 1 or idx == total or idx % progress_every == 0:
+            print(f"[{idx}/{total}] Finished features for {sym}", flush=True)
+
+    _clear_state(state_file)
+    print(f"Completed features batch: symbols={total} universe={universe_mode!r}")
+
+
+def _env_backfill() -> bool:
+    return os.environ.get("FEATURES_BACKFILL", "").strip().lower() in (
         "1",
         "true",
         "yes",
     )
-    for sym in resolve_ingestion_symbols():
-        run_feature_pipeline(sym, backfill=backfill)
+
+
+def _env_state_file() -> Path | None:
+    raw = os.environ.get("FEATURES_STATE_FILE", str(DEFAULT_STATE_FILE)).strip()
+    if not raw or raw.lower() in ("0", "false", "no", "none", "off"):
+        return None
+    return Path(raw).expanduser()
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description="Build stock features from clean prices")
+    ap.add_argument(
+        "--start-at",
+        default=None,
+        help="Start from this symbol in resolved universe order (inclusive)",
+    )
+    ap.add_argument(
+        "--progress-every",
+        type=int,
+        default=None,
+        help="Log bracket progress every N symbols (default: FEATURES_PROGRESS_EVERY or 1)",
+    )
+    args = ap.parse_args(argv)
+
+    start_at = args.start_at or os.environ.get("FEATURES_START_AT") or None
+    progress_raw = args.progress_every
+    if progress_raw is None:
+        progress_raw = int(os.environ.get("FEATURES_PROGRESS_EVERY", "1") or "1")
+
+    run_features_batch(
+        backfill=_env_backfill(),
+        start_at=start_at,
+        progress_every=progress_raw,
+        state_file=_env_state_file(),
+    )
+
+
+if __name__ == "__main__":
+    main()

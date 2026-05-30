@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate migrate-url universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
+.PHONY: lint fmt up down logs migrate migrate-url universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill features-backfill-status train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
 
 up:
 	cd infra && docker compose up -d
@@ -45,18 +45,33 @@ clean:
 	export PYTHONPATH=src && python src/data_pipeline/processing/clean_prices.py
 	
 features:
-	export PYTHONPATH=src && python src/data_pipeline/features/build_features.py
+	export PYTHONPATH=src && python -u src/data_pipeline/features/build_features.py
 
 features-sp500:
-	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && python src/data_pipeline/features/build_features.py
+	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && python -u src/data_pipeline/features/build_features.py
 
 # Full recompute features from clean history for all symbols in current universe
 features-backfill:
-	export PYTHONPATH=src && export FEATURES_BACKFILL=1 && python src/data_pipeline/features/build_features.py
+	export PYTHONPATH=src && export FEATURES_BACKFILL=1 && python -u src/data_pipeline/features/build_features.py \
+		$$( [ -n "$${FEATURES_START_AT:-}" ] && printf '%s %s' --start-at "$${FEATURES_START_AT}" )
 
 # First SP500 historical feature build: same as features-backfill with INGESTION_UNIVERSE=sp500
 features-sp500-backfill:
-	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && export FEATURES_BACKFILL=1 && python src/data_pipeline/features/build_features.py
+	export PYTHONPATH=src && export INGESTION_UNIVERSE=sp500 && export FEATURES_BACKFILL=1 && \
+	python -u src/data_pipeline/features/build_features.py \
+		$$( [ -n "$${FEATURES_START_AT:-}" ] && printf '%s %s' --start-at "$${FEATURES_START_AT}" )
+
+# Show last checkpoint from a features backfill run (or tail of log if no state file)
+features-backfill-status:
+	@if [ -f "$${FEATURES_STATE_FILE:-/tmp/features-backfill.state}" ]; then \
+		cat "$${FEATURES_STATE_FILE:-/tmp/features-backfill.state}"; \
+	else \
+		echo "No checkpoint file at $${FEATURES_STATE_FILE:-/tmp/features-backfill.state}"; \
+		if [ -f "$${FEATURES_LOG:-/tmp/features-backfill.log}" ]; then \
+			echo "Last log line:"; \
+			tail -1 "$${FEATURES_LOG:-/tmp/features-backfill.log}"; \
+		fi; \
+	fi
 
 train:
 	export PYTHONPATH=src && python src/scripts/run_train.py
