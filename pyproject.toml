@@ -9,3 +9,7 @@ extend-select = ["I"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# sys.path bootstrap for Streamlit Community Cloud must run before `from ui...` imports.
+"src/ui/streamlit_app.py" = ["E402"]
