@@ -1,0 +1,7 @@
+# Streamlit Community Cloud reads this file first (same dir as streamlit_app.py).
+# Full backend deps stay in repo-root requirements.txt for EC2/API.
+streamlit==1.55.0
+pandas==2.2.3
+numpy==2.4.3
+plotly==5.24.1
+requests==2.32.5

@@ -1,5 +1,5 @@
-# Slim deps for Streamlit Community Cloud (UI only; inference runs on EC2 API).
-# In app settings set "Python dependencies file" to this path (not requirements.txt).
+# Reference copy of src/ui/requirements.txt (Streamlit Cloud auto-detects that path).
+# See docs/DEPLOY_AWS_GITHUB.md Step 12 — do not rename repo-root requirements.txt.
 streamlit==1.55.0
 pandas==2.2.3
 numpy==2.4.3
