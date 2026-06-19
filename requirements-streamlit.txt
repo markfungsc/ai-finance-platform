@@ -1,0 +1,7 @@
+# Slim deps for Streamlit Community Cloud (UI only; inference runs on EC2 API).
+# In app settings set "Python dependencies file" to this path (not requirements.txt).
+streamlit==1.55.0
+pandas==2.2.3
+numpy==2.4.3
+plotly==5.24.1
+requests==2.32.5
