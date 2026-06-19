@@ -8,6 +8,14 @@ Or:             streamlit run src/ui/streamlit_app.py
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Streamlit Community Cloud does not set PYTHONPATH=src; local make/Docker do.
+_src = Path(__file__).resolve().parents[1]
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
 import os
 import time
 from typing import Any
