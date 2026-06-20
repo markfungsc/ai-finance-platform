@@ -1,0 +1,39 @@
+# Daily incremental ingestion → clean → features on EC2 (self-hosted runner).
+# Requires Step 9 runner with labels: self-hosted, aws-ec2
+# See docs/DEPLOY_AWS_GITHUB.md Step 10
+
+name: Data daily
+
+on:
+  schedule:
+    # Weekdays 22:30 UTC (~after US market close + buffer)
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      ingestion_universe:
+        description: INGESTION_UNIVERSE (sp500 or subscriptions)
+        type: choice
+        options:
+          - sp500
+          - subscriptions
+        default: sp500
+
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: [self-hosted, aws-ec2]
+    steps:
+      - name: Run daily pipeline on EC2
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          INGESTION_UNIVERSE: ${{ github.event.inputs.ingestion_universe || 'sp500' }}
+        run: |
+          APP_DIR=/opt/ai-finance/app
+          if [ ! -f "$APP_DIR/scripts/run_daily_pipeline.sh" ]; then
+            git -C "$APP_DIR" fetch origin main
+            git -C "$APP_DIR" reset --hard origin/main
+          fi
+          bash "$APP_DIR/scripts/run_daily_pipeline.sh"

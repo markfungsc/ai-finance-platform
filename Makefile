@@ -1,4 +1,4 @@
-.PHONY: lint fmt up down logs migrate migrate-url universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill features-backfill-status train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
+.PHONY: lint fmt up down logs migrate migrate-url universe-fetch-sp500 universe-preflight universe-preflight-sp500 ingestion ingestion-sp500 clean features features-sp500 features-backfill features-sp500-backfill features-backfill-status data-daily train walk-forward backtest experiments view-results predict serve-api streamlit test activate-vm news-ingest news-backfill-free news-backfill-free-finbert news-backfill-kaggle news-backfill-kaggle-finbert news-backfill-kaggle-dual news-backfill-kaggle-dual-finbert sentiment-rollup sentiment-rollup-full embed-news-qdrant embed-news-qdrant-all
 
 up:
 	cd infra && docker compose up -d
@@ -72,6 +72,10 @@ features-backfill-status:
 			tail -1 "$${FEATURES_LOG:-/tmp/features-backfill.log}"; \
 		fi; \
 	fi
+
+# Incremental ingestion → clean → features (EC2 / self-hosted runner). See scripts/run_daily_pipeline.sh
+data-daily:
+	bash scripts/run_daily_pipeline.sh
 
 train:
 	export PYTHONPATH=src && python src/scripts/run_train.py
